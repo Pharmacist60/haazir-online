@@ -1,0 +1,14 @@
+// Developer tool: turns src/*.jsx into the browser files in web/. Needs the TypeScript compiler (only to convert JSX).
+const fs = require('fs'), path = require('path');
+const ts = require(process.env.TS_PATH || 'typescript');
+const src = f => fs.readFileSync(path.join(__dirname, '../src', f), 'utf8');
+const version = (fs.readFileSync(path.join(__dirname, '../supabase/functions/haazir/api.js'), 'utf8').match(/VERSION = '([^']+)'/) || [])[1];
+function build(entry, out) {
+  const code = `const APP_VERSION = ${JSON.stringify(version)};\n` + src('icons.jsx') + '\n' + src('shared.jsx') + '\n' + src(entry);
+  const r = ts.transpileModule(code, { reportDiagnostics: true, fileName: entry, compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } });
+  if (r.diagnostics.length) { for (const d of r.diagnostics) console.error(entry, d.messageText); process.exit(1); }
+  fs.writeFileSync(path.join(__dirname, '../web', out), '"use strict";\n' + r.outputText);
+  console.log('built', out, (r.outputText.length / 1024).toFixed(0) + ' KB', 'version', version);
+}
+build('admin.jsx', 'admin/admin.js');
+build('app.jsx', 'app/app.js');
