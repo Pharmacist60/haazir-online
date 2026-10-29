@@ -1,0 +1,56 @@
+name: Deploy Haazir
+
+# Runs every time files change on GitHub: updates Haazir's server on Supabase and the pages on GitHub Pages.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - name: Get the Haazir files
+        uses: actions/checkout@v4
+
+      - name: Check the settings
+        run: |
+          if [ -z "${{ vars.SUPABASE_PROJECT_REF }}" ]; then echo "::error::The SUPABASE_PROJECT_REF variable is missing. See Part 3 of the setup guide."; exit 1; fi
+          if [ -z "${{ secrets.SUPABASE_ACCESS_TOKEN }}" ]; then echo "::error::The SUPABASE_ACCESS_TOKEN secret is missing. See Part 3 of the setup guide."; exit 1; fi
+
+      - name: Set up the Supabase tools
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Update Haazir's server on Supabase
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase functions deploy haazir --project-ref "${{ vars.SUPABASE_PROJECT_REF }}" --no-verify-jwt
+
+      - name: Point the pages at the server
+        run: echo "window.HAAZIR_API = \"https://${{ vars.SUPABASE_PROJECT_REF }}.supabase.co/functions/v1/haazir\";" > web/config.js
+
+      - name: Prepare GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload the pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+      - name: Publish the pages
+        id: pages
+        uses: actions/deploy-pages@v4
