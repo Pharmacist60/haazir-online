@@ -168,6 +168,7 @@ table.t{width:100%;border-collapse:collapse;font-size:14px}
 .updbar span{flex:1;min-width:200px}
 .relnotes{white-space:pre-wrap;background:var(--paper);border-radius:10px;padding:12px 14px;font-size:14px;max-height:320px;overflow:auto}
 .pa a.btn{text-decoration:none}
+.linkish{border:0;background:none;color:var(--green-d);font-weight:700;font-size:14px;padding:6px;text-decoration:underline;cursor:pointer}
 .printhead{display:none}
 @media print{.pa{background:#fff}.side,.topbar,.updbar,.popups,.noprint,.toast,.pa button,.pa select,.seg2{display:none!important}.admin{display:block}.main{padding:0;max-width:none}.panel{border:0;padding:0;overflow:visible}.printhead{display:block;margin-bottom:10px;font-size:13px;color:#575E7E}.stats{grid-template-columns:repeat(4,1fr)}}
 .codein{font-size:30px!important;letter-spacing:.3em;text-align:center;font-variant-numeric:tabular-nums}

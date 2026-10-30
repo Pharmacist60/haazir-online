@@ -47,11 +47,12 @@ function Register({ st, reload }) {
       <div className="field"><label>PIN</label><input type="password" inputMode="numeric" maxLength={4} value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ""))} /></div>
       <button className="btn primary block" onClick={send} disabled={busy}>Send for Approval</button>
       {err && <div className="err">{err}</div>}
+      <p className="muted" style={{ fontSize: 13, margin: 0 }}>Don't know your PIN? Your admin sets it when adding you under Employees.</p>
     </div>
   );
 }
 
-function PinPad({ title, msg, onDone, onCancel, busy }) {
+function PinPad({ title, msg, onDone, onCancel, busy, onForgot }) {
   const [pin, setPin] = useState("");
   const press = k => {
     if (busy) return;
@@ -67,6 +68,50 @@ function PinPad({ title, msg, onDone, onCancel, busy }) {
       <div className="pinpad">{["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "del"].map((k, i) =>
         k === "" ? <span key={i} /> : <button key={i} onClick={() => press(k)} aria-label={k === "del" ? "Delete" : k}>{k === "del" ? "⌫" : k}</button>)}</div>
       <button className="btn block" onClick={onCancel}>Cancel</button>
+      {onForgot && <button className="linkish" onClick={onForgot}>Forgot your PIN?</button>}
+    </div>
+  );
+}
+
+function ChangePin({ onClose }) {
+  const [f, setF] = useState({ current: "", next: "", confirm: "" }); const [err, setErr] = useState(""); const [busy, setBusy] = useState(false); const [done, setDone] = useState(false);
+  const digits = v => v.replace(/\D/g, "").slice(0, 4);
+  const save = async () => {
+    if (f.next.length !== 4) return setErr("The new PIN must be 4 digits.");
+    if (f.next !== f.confirm) return setErr("The new PINs do not match.");
+    setBusy(true); setErr("");
+    try { await api("/api/device/pin", { current: f.current, next: f.next }); setDone(true); } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  if (done) return <div className="sheet ok pop"><Check size={28} color="#00661A" /><h3>PIN Changed</h3><p>Use your new PIN from now on.</p><button className="btn block" onClick={onClose}>Done</button></div>;
+  return (
+    <div className="sheet pop">
+      <KeyRound size={30} color="#0F1561" />
+      <h3>Change Your PIN</h3>
+      <div className="lateform">
+        <div className="field"><label>Current PIN</label><input type="password" inputMode="numeric" maxLength={4} value={f.current} onChange={e => setF({ ...f, current: digits(e.target.value) })} /></div>
+        <div className="field"><label>New PIN (4 digits)</label><input type="password" inputMode="numeric" maxLength={4} value={f.next} onChange={e => setF({ ...f, next: digits(e.target.value) })} /></div>
+        <div className="field"><label>Confirm new PIN</label><input type="password" inputMode="numeric" maxLength={4} value={f.confirm} onChange={e => setF({ ...f, confirm: digits(e.target.value) })} /></div>
+        {err && <div className="err" style={{ marginTop: 0 }}>{err}</div>}
+        <button className="btn primary block" onClick={save} disabled={busy}>Save New PIN</button>
+        <button className="btn block" onClick={onClose}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function ForgotPin({ onClose }) {
+  const [state, setState] = useState("ask"); const [err, setErr] = useState("");
+  const send = async () => { setErr(""); try { await api("/api/device/pin-forgot", {}); setState("sent"); } catch (e) { setErr(e.message); } };
+  if (state === "sent") return <div className="sheet ok pop"><Check size={28} color="#00661A" /><h3>Request Sent</h3><p>Your admin has been notified and will set a new PIN for you. Ask them for it, then change it to your own PIN using <b>Change PIN</b>.</p><button className="btn block" onClick={onClose}>Done</button></div>;
+  return (
+    <div className="sheet pop">
+      <KeyRound size={30} color="#0F1561" />
+      <h3>Forgot Your PIN?</h3>
+      <p>For security, only an admin can set a new PIN. Send a request and your admin will be notified.</p>
+      {err && <div className="err" style={{ marginTop: 0 }}>{err}</div>}
+      <button className="btn primary block" onClick={send}>Ask Admin for a New PIN</button>
+      <button className="btn block" onClick={onClose}>Cancel</button>
     </div>
   );
 }
@@ -151,6 +196,11 @@ function Home({ st, reload }) {
     catch (e) { setMsg(e.message); if (e.status === 403) setStep(null); }
     setBusy(false);
   };
+  // The Android app's Back button closes an open form first.
+  useEffect(() => {
+    window.hzBack = () => { if (step && step !== "bio") { setStep(null); setMsg(""); return true; } if (done || msg) { setDone(null); setMsg(""); return true; } return false; };
+    return () => { delete window.hzBack; };
+  }, [step, done, msg]);
   const submitPin = pin => submit({ pin, code, bio: bioState === "ok", bioUnavailable: bioState === "unavailable" });
 
   return (
@@ -174,7 +224,9 @@ function Home({ st, reload }) {
       {step === "bio" && (
         <div className="sheet pop"><Fingerprint size={56} color="#007A1F" /><h3>Verify Your Identity</h3><p>Use your fingerprint or face unlock to continue.</p></div>
       )}
-      {step === "pin" && <PinPad title="Enter Your PIN" msg={msg || (bioState === "ok" ? "" : "")} busy={busy} onDone={submitPin} onCancel={() => { setStep(null); setMsg(""); }} />}
+      {step === "pin" && <PinPad title="Enter Your PIN" msg={msg} busy={busy} onDone={submitPin} onCancel={() => { setStep(null); setMsg(""); }} onForgot={() => { setMsg(""); setStep("forgot"); }} />}
+      {step === "changepin" && <ChangePin onClose={() => setStep(null)} />}
+      {step === "forgot" && <ForgotPin onClose={() => setStep(null)} />}
       {step === "late" && <LateForm st={st} reload={reload} onClose={() => setStep(null)} />}
       {!step && (
         <>
@@ -200,6 +252,10 @@ function Home({ st, reload }) {
             <table className="mini"><tbody>{st.lateReqs.slice(0, 3).map(r => <tr key={r.id}><td>{niceDate(r.date)}</td><td className="num">{r.in ? fmt(r.in) : "—"} – {r.out ? fmt(r.out) : "—"}</td>
               <td style={{ textAlign: "right" }}><span className={"tag" + (r.status === "pending" ? " amber" : r.status === "rejected" ? " red" : "")}>{r.status === "pending" ? "Pending" : r.status === "approved" ? "Approved" : "Rejected"}</span></td></tr>)}</tbody></table>
           </div>}
+          <div className="row" style={{ justifyContent: "center" }}>
+            <button className="btn small" onClick={() => { setDone(null); setMsg(""); setStep("changepin"); }}><KeyRound size={14} /> Change PIN</button>
+            <button className="btn small" onClick={() => { setDone(null); setMsg(""); setStep("forgot"); }}>Forgot PIN?</button>
+          </div>
           <button className="latebanner" onClick={() => { setDone(null); setMsg(""); setStep("late"); }}>
             <span className="ic"><Clock size={20} /></span>
             <span className="txt"><b>Missed <span className="nb">Check-In</span> or <span className="nb">Check-Out?</span></b><small>Request Late Entry</small></span>

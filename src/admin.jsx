@@ -9,6 +9,15 @@ function AdminView({ db, act, reload, onSignOut, notif, serverVersion }) {
     ...(superAdmin ? [["Administration", [["network", "Pharmacy Network", Network], ["access", "Admins & Security", ShieldCheck], ["backup", "Backup & Restore", DatabaseBackup], ["updates", "App Updates", Download], ["log", "Audit Log", ScrollText]]]] : []),
   ];
   const [tab, setTab] = useState("today");
+  // The Android app's Back button: return to Today first, then let the app ask about exiting.
+  useEffect(() => {
+    window.hzBack = () => {
+      if (notif.settings) { notif.closeSettings(); return true; }
+      if (tab !== "today") { setTab("today"); window.scrollTo(0, 0); return true; }
+      return false;
+    };
+    return () => { delete window.hzBack; };
+  }, [tab, notif.settings]);
   const p = { db, act, me, superAdmin };
   const badges = { phones: db.requests.length, late: db.lateReqs.filter(r => r.status === "pending").length, updates: db.update && db.update.available ? 1 : 0 };
   const Btn = ([k, l, I]) => <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}><span className="ico"><I size={16} /></span>{l}{badges[k] > 0 && <span className="tag amber">{badges[k]}</span>}</button>;
@@ -592,6 +601,7 @@ const NOTE_TYPES = [
   ["late", "Late Arrival", "When an employee arrives after the grace period.", " amber"],
   ["absent", "Not Checked In", "When an employee has not checked in by shift start plus grace period.", " red"],
   ["overleave", "Beyond Allowed Leaves", "When an absent employee has already used all paid leaves for the month.", " red"],
+  ["pinreset", "PIN Reset Request", "When an employee forgets their PIN and asks for a new one.", " amber"],
 ];
 const noteLabel = t => (NOTE_TYPES.find(n => n[0] === t) || [t, t])[1];
 const noteTag = t => (NOTE_TYPES.find(n => n[0] === t) || [, , , ""])[3];
@@ -673,7 +683,7 @@ function NotifySettings({ db, act, notif }) {
         <h2 id="nstitle">Notification Settings</h2>
         <p className="muted">Choose which pop-ups you receive. These settings apply to your account only.</p>
         {NOTE_TYPES.map(([k, t, d]) => <label key={k} className="switchrow"><span><b>{t}</b><small>{d}</small></span>
-          <input type="checkbox" className="switch" checked={!!p[k]} onChange={() => toggle(k)} /></label>)}
+          <input type="checkbox" className="switch" checked={p[k] !== false && (p[k] !== undefined || k === "pinreset")} onChange={() => setP({ ...p, [k]: !(p[k] !== false && (p[k] !== undefined || k === "pinreset")) })} /></label>)}
         <label className="switchrow"><span><b>Notification Tone</b><small>Play a short tone when a new notification arrives.</small></span>
           <input type="checkbox" className="switch" checked={p.sound !== false} onChange={() => setP({ ...p, sound: p.sound === false })} /></label>
         <label className="switchrow"><span><b>Device Notifications</b><small>Also show notifications on this device while Haazir is open in the background.</small></span>

@@ -5,7 +5,7 @@ import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
 import * as L from './logic.js';
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.0';
 
 /* ---------------- database layout ---------------- */
 // Every table, with its columns. Used to create the database, and to back up and restore it.
@@ -23,7 +23,7 @@ const TABLES = {
   events: ['id', 'at_ms', 'at', 'type', 'emp_id', 'text', 'uniq'],
 };
 const SERIAL_TABLES = ['attendance', 'late_requests', 'networks', 'audit', 'events'];
-const DEFAULT_NOTIFY = '{"checkin":true,"checkout":true,"late":true,"absent":true,"overleave":true,"device":false,"sound":true}';
+const DEFAULT_NOTIFY = '{"checkin":true,"checkout":true,"late":true,"absent":true,"overleave":true,"pinreset":true,"device":false,"sound":true}';
 
 function schema(dialect) {
   const pg = dialect === 'pg';
@@ -158,7 +158,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   }
 
   /* ----- notifications ----- */
-  const EVENT_TYPES = ['checkin', 'checkout', 'late', 'absent', 'overleave'];
+  const EVENT_TYPES = ['checkin', 'checkout', 'late', 'absent', 'overleave', 'pinreset'];
   async function addEvent(type, empId, text, uniq = null) {
     if (uniq && await one('SELECT 1 AS x FROM events WHERE uniq = ?', uniq)) return;
     try { await run('INSERT INTO events (at_ms, at, type, emp_id, text, uniq) VALUES (?, ?, ?, ?, ?, ?)', Date.now(), L.stamp(), type, empId, text, uniq); }
@@ -377,7 +377,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
         id, entry.from, entry.salary, entry.start, entry.end, entry.hours, entry.monthHours, JSON.stringify(entry.off), entry.leaves, entry.grace);
       if (old) {
         await q('UPDATE employees SET name = ?, role = ?, joined = ?, left_date = ? WHERE id = ?', name, role, b.joined, b.left || null, old.id);
-        if (pin) await q('UPDATE employees SET pin_hash = ? WHERE id = ?', hashSecret(pin), old.id);
+        if (pin) { await q('UPDATE employees SET pin_hash = ? WHERE id = ?', hashSecret(pin), old.id); await q('UPDATE devices SET pin_fails = 0, locked_until = 0 WHERE emp_id = ?', old.id); }
         await saveSettings(old.id);
         const first = (await q('SELECT eff_from FROM emp_settings WHERE emp_id = ? ORDER BY eff_from LIMIT 1', old.id))[0];
         if (b.joined < first.eff_from) await q('UPDATE emp_settings SET eff_from = ? WHERE emp_id = ? AND eff_from = ?', b.joined, old.id, first.eff_from);
@@ -523,7 +523,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   route('GET', '/api/events', async ({ req, url }) => {
     const a = await requireAdmin(req), prefs = prefsOf(a);
     const after = Number(url.searchParams.get('after') || 0);
-    const types = EVENT_TYPES.filter(t => prefs[t]);
+    const types = EVENT_TYPES.filter(t => prefs[t] !== false);
     const rows = types.length ? await all(`SELECT id, at, type, emp_id AS "empId", text FROM events WHERE id > ? AND type IN (${types.map(() => '?').join(',')}) ORDER BY id DESC LIMIT 50`, after, ...types) : [];
     const latest = await one('SELECT MAX(id) AS m FROM events');
     return { events: rows.map(r => ({ ...r, id: Number(r.id) })), lastSeen: Number(a.last_seen), latestId: Number((latest && latest.m) || 0) };
@@ -536,7 +536,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   });
   route('POST', '/api/notify/prefs', async ({ req, body: b }) => {
     const a = await requireAdmin(req);
-    const prefs = Object.fromEntries([...EVENT_TYPES, 'device', 'sound'].map(k => [k, !!b[k]]));
+    const prefs = Object.fromEntries([...EVENT_TYPES, 'device', 'sound'].map(k => [k, b[k] === undefined ? k === 'pinreset' : !!b[k]]));
     await run('UPDATE admins SET notify = ? WHERE username = ?', JSON.stringify(prefs), a.username);
     return { ok: true };
   });
@@ -658,6 +658,36 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     await run('UPDATE attendance SET out_time = ? WHERE id = ?', t, rec.id);
     await addEvent('checkout', emp.id, `${emp.name} checked out at ${L.fmt(t)}.`);
     return { action: 'out', time: t };
+  });
+
+  // Employees change their own PIN (they must know the current one).
+  route('POST', '/api/device/pin', async ({ req, body: b }) => {
+    const { dev, row, emp } = await employeeForDevice(req);
+    need(emp && !L.isGone(emp), 'This phone is not approved for attendance.', 403);
+    need(Number(row.locked_until) < Date.now(), 'Too many incorrect PINs. Please try again in 5 minutes.', 429);
+    const pinRow = await one('SELECT pin_hash FROM employees WHERE id = ?', emp.id);
+    if (!checkSecret(String(b.current || ''), pinRow.pin_hash)) {
+      const fails = Number(row.pin_fails) + 1;
+      await run('UPDATE devices SET pin_fails = ?, locked_until = ? WHERE id = ?', fails >= 5 ? 0 : fails, fails >= 5 ? Date.now() + 5 * 60 * 1000 : 0, dev.id);
+      throw new Fail(401, fails >= 5 ? 'Too many incorrect PINs. Please try again in 5 minutes.' : 'Your current PIN is incorrect.');
+    }
+    const next = String(b.next || '');
+    need(/^\d{4}$/.test(next), 'The new PIN must be 4 digits.');
+    need(next !== String(b.current), 'The new PIN must be different from the current one.');
+    need(!/^(\d)\1{3}$/.test(next) && !['1234', '4321', '0123', '9876'].includes(next), 'Please choose a less obvious PIN than repeated or sequential digits.');
+    await run('UPDATE employees SET pin_hash = ? WHERE id = ?', hashSecret(next), emp.id);
+    await run('UPDATE devices SET pin_fails = 0 WHERE id = ?', dev.id);
+    await audit(`${emp.name} (${emp.id})`, 'Changed their own PIN from their phone');
+    return { ok: true };
+  });
+  // Employees who forgot their PIN ask an admin to set a new one.
+  route('POST', '/api/device/pin-forgot', async ({ req }) => {
+    const { emp } = await employeeForDevice(req);
+    need(emp && !L.isGone(emp), 'This phone is not approved for attendance. Please speak to your admin.', 403);
+    need(!limited('pinforgot:' + emp.id, 3, 60 * 60 * 1000), 'Your request has already been sent. Please speak to your admin.', 429);
+    await addEvent('pinreset', emp.id, `${emp.name} (${emp.id}) forgot their PIN and asked for a reset. Set a new PIN under Employees.`, `pinreset:${emp.id}:${L.today()}`);
+    await audit(`${emp.name} (${emp.id})`, 'Asked an admin to reset their PIN');
+    return { ok: true };
   });
 
   route('POST', '/api/late/request', async ({ req, body: b }) => {

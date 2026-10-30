@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.1.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -233,6 +233,7 @@ table.t{width:100%;border-collapse:collapse;font-size:14px}
 .updbar span{flex:1;min-width:200px}
 .relnotes{white-space:pre-wrap;background:var(--paper);border-radius:10px;padding:12px 14px;font-size:14px;max-height:320px;overflow:auto}
 .pa a.btn{text-decoration:none}
+.linkish{border:0;background:none;color:var(--green-d);font-weight:700;font-size:14px;padding:6px;text-decoration:underline;cursor:pointer}
 .printhead{display:none}
 @media print{.pa{background:#fff}.side,.topbar,.updbar,.popups,.noprint,.toast,.pa button,.pa select,.seg2{display:none!important}.admin{display:block}.main{padding:0;max-width:none}.panel{border:0;padding:0;overflow:visible}.printhead{display:block;margin-bottom:10px;font-size:13px;color:#575E7E}.stats{grid-template-columns:repeat(4,1fr)}}
 .codein{font-size:30px!important;letter-spacing:.3em;text-align:center;font-variant-numeric:tabular-nums}
@@ -595,6 +596,22 @@ function AdminView({ db, act, reload, onSignOut, notif, serverVersion }) {
         ...(superAdmin ? [["Administration", [["network", "Pharmacy Network", Network], ["access", "Admins & Security", ShieldCheck], ["backup", "Backup & Restore", DatabaseBackup], ["updates", "App Updates", Download], ["log", "Audit Log", ScrollText]]]] : []),
     ];
     const [tab, setTab] = useState("today");
+    // The Android app's Back button: return to Today first, then let the app ask about exiting.
+    useEffect(() => {
+        window.hzBack = () => {
+            if (notif.settings) {
+                notif.closeSettings();
+                return true;
+            }
+            if (tab !== "today") {
+                setTab("today");
+                window.scrollTo(0, 0);
+                return true;
+            }
+            return false;
+        };
+        return () => { delete window.hzBack; };
+    }, [tab, notif.settings]);
     const p = { db, act, me, superAdmin };
     const badges = { phones: db.requests.length, late: db.lateReqs.filter(r => r.status === "pending").length, updates: db.update && db.update.available ? 1 : 0 };
     const Btn = ([k, l, I]) => React.createElement("button", { key: k, className: tab === k ? "on" : "", onClick: () => setTab(k) },
@@ -1620,6 +1637,7 @@ const NOTE_TYPES = [
     ["late", "Late Arrival", "When an employee arrives after the grace period.", " amber"],
     ["absent", "Not Checked In", "When an employee has not checked in by shift start plus grace period.", " red"],
     ["overleave", "Beyond Allowed Leaves", "When an absent employee has already used all paid leaves for the month.", " red"],
+    ["pinreset", "PIN Reset Request", "When an employee forgets their PIN and asks for a new one.", " amber"],
 ];
 const noteLabel = t => (NOTE_TYPES.find(n => n[0] === t) || [t, t])[1];
 const noteTag = t => (NOTE_TYPES.find(n => n[0] === t) || [, , , ""])[3];
@@ -1738,7 +1756,7 @@ function NotifySettings({ db, act, notif }) {
                 React.createElement("span", null,
                     React.createElement("b", null, t),
                     React.createElement("small", null, d)),
-                React.createElement("input", { type: "checkbox", className: "switch", checked: !!p[k], onChange: () => toggle(k) }))),
+                React.createElement("input", { type: "checkbox", className: "switch", checked: p[k] !== false && (p[k] !== undefined || k === "pinreset"), onChange: () => setP({ ...p, [k]: !(p[k] !== false && (p[k] !== undefined || k === "pinreset")) }) }))),
             React.createElement("label", { className: "switchrow" },
                 React.createElement("span", null,
                     React.createElement("b", null, "Notification Tone"),

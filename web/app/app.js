@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.1.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -233,6 +233,7 @@ table.t{width:100%;border-collapse:collapse;font-size:14px}
 .updbar span{flex:1;min-width:200px}
 .relnotes{white-space:pre-wrap;background:var(--paper);border-radius:10px;padding:12px 14px;font-size:14px;max-height:320px;overflow:auto}
 .pa a.btn{text-decoration:none}
+.linkish{border:0;background:none;color:var(--green-d);font-weight:700;font-size:14px;padding:6px;text-decoration:underline;cursor:pointer}
 .printhead{display:none}
 @media print{.pa{background:#fff}.side,.topbar,.updbar,.popups,.noprint,.toast,.pa button,.pa select,.seg2{display:none!important}.admin{display:block}.main{padding:0;max-width:none}.panel{border:0;padding:0;overflow:visible}.printhead{display:block;margin-bottom:10px;font-size:13px;color:#575E7E}.stats{grid-template-columns:repeat(4,1fr)}}
 .codein{font-size:30px!important;letter-spacing:.3em;text-align:center;font-variant-numeric:tabular-nums}
@@ -657,9 +658,10 @@ function Register({ st, reload }) {
             React.createElement("label", null, "PIN"),
             React.createElement("input", { type: "password", inputMode: "numeric", maxLength: 4, value: pin, onChange: e => setPin(e.target.value.replace(/\D/g, "")) })),
         React.createElement("button", { className: "btn primary block", onClick: send, disabled: busy }, "Send for Approval"),
-        err && React.createElement("div", { className: "err" }, err)));
+        err && React.createElement("div", { className: "err" }, err),
+        React.createElement("p", { className: "muted", style: { fontSize: 13, margin: 0 } }, "Don't know your PIN? Your admin sets it when adding you under Employees.")));
 }
-function PinPad({ title, msg, onDone, onCancel, busy }) {
+function PinPad({ title, msg, onDone, onCancel, busy, onForgot }) {
     const [pin, setPin] = useState("");
     const press = k => {
         if (busy)
@@ -678,7 +680,80 @@ function PinPad({ title, msg, onDone, onCancel, busy }) {
         msg && React.createElement("div", { className: "err", style: { marginTop: 0 } }, msg),
         React.createElement("div", { className: "dots" }, [0, 1, 2, 3].map(i => React.createElement("span", { key: i, className: i < pin.length ? "f" : "" }))),
         React.createElement("div", { className: "pinpad" }, ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "del"].map((k, i) => k === "" ? React.createElement("span", { key: i }) : React.createElement("button", { key: i, onClick: () => press(k), "aria-label": k === "del" ? "Delete" : k }, k === "del" ? "⌫" : k))),
-        React.createElement("button", { className: "btn block", onClick: onCancel }, "Cancel")));
+        React.createElement("button", { className: "btn block", onClick: onCancel }, "Cancel"),
+        onForgot && React.createElement("button", { className: "linkish", onClick: onForgot }, "Forgot your PIN?")));
+}
+function ChangePin({ onClose }) {
+    const [f, setF] = useState({ current: "", next: "", confirm: "" });
+    const [err, setErr] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [done, setDone] = useState(false);
+    const digits = v => v.replace(/\D/g, "").slice(0, 4);
+    const save = async () => {
+        if (f.next.length !== 4)
+            return setErr("The new PIN must be 4 digits.");
+        if (f.next !== f.confirm)
+            return setErr("The new PINs do not match.");
+        setBusy(true);
+        setErr("");
+        try {
+            await api("/api/device/pin", { current: f.current, next: f.next });
+            setDone(true);
+        }
+        catch (e) {
+            setErr(e.message);
+        }
+        setBusy(false);
+    };
+    if (done)
+        return React.createElement("div", { className: "sheet ok pop" },
+            React.createElement(Check, { size: 28, color: "#00661A" }),
+            React.createElement("h3", null, "PIN Changed"),
+            React.createElement("p", null, "Use your new PIN from now on."),
+            React.createElement("button", { className: "btn block", onClick: onClose }, "Done"));
+    return (React.createElement("div", { className: "sheet pop" },
+        React.createElement(KeyRound, { size: 30, color: "#0F1561" }),
+        React.createElement("h3", null, "Change Your PIN"),
+        React.createElement("div", { className: "lateform" },
+            React.createElement("div", { className: "field" },
+                React.createElement("label", null, "Current PIN"),
+                React.createElement("input", { type: "password", inputMode: "numeric", maxLength: 4, value: f.current, onChange: e => setF({ ...f, current: digits(e.target.value) }) })),
+            React.createElement("div", { className: "field" },
+                React.createElement("label", null, "New PIN (4 digits)"),
+                React.createElement("input", { type: "password", inputMode: "numeric", maxLength: 4, value: f.next, onChange: e => setF({ ...f, next: digits(e.target.value) }) })),
+            React.createElement("div", { className: "field" },
+                React.createElement("label", null, "Confirm new PIN"),
+                React.createElement("input", { type: "password", inputMode: "numeric", maxLength: 4, value: f.confirm, onChange: e => setF({ ...f, confirm: digits(e.target.value) }) })),
+            err && React.createElement("div", { className: "err", style: { marginTop: 0 } }, err),
+            React.createElement("button", { className: "btn primary block", onClick: save, disabled: busy }, "Save New PIN"),
+            React.createElement("button", { className: "btn block", onClick: onClose }, "Cancel"))));
+}
+function ForgotPin({ onClose }) {
+    const [state, setState] = useState("ask");
+    const [err, setErr] = useState("");
+    const send = async () => { setErr(""); try {
+        await api("/api/device/pin-forgot", {});
+        setState("sent");
+    }
+    catch (e) {
+        setErr(e.message);
+    } };
+    if (state === "sent")
+        return React.createElement("div", { className: "sheet ok pop" },
+            React.createElement(Check, { size: 28, color: "#00661A" }),
+            React.createElement("h3", null, "Request Sent"),
+            React.createElement("p", null,
+                "Your admin has been notified and will set a new PIN for you. Ask them for it, then change it to your own PIN using ",
+                React.createElement("b", null, "Change PIN"),
+                "."),
+            React.createElement("button", { className: "btn block", onClick: onClose }, "Done"));
+    return (React.createElement("div", { className: "sheet pop" },
+        React.createElement(KeyRound, { size: 30, color: "#0F1561" }),
+        React.createElement("h3", null, "Forgot Your PIN?"),
+        React.createElement("p", null, "For security, only an admin can set a new PIN. Send a request and your admin will be notified."),
+        err && React.createElement("div", { className: "err", style: { marginTop: 0 } }, err),
+        React.createElement("button", { className: "btn primary block", onClick: send }, "Ask Admin for a New PIN"),
+        React.createElement("button", { className: "btn block", onClick: onClose }, "Cancel")));
 }
 function LateForm({ st, onClose, reload }) {
     const emp = st.employee;
@@ -819,6 +894,19 @@ function Home({ st, reload }) {
         }
         setBusy(false);
     };
+    // The Android app's Back button closes an open form first.
+    useEffect(() => {
+        window.hzBack = () => { if (step && step !== "bio") {
+            setStep(null);
+            setMsg("");
+            return true;
+        } if (done || msg) {
+            setDone(null);
+            setMsg("");
+            return true;
+        } return false; };
+        return () => { delete window.hzBack; };
+    }, [step, done, msg]);
     const submitPin = pin => submit({ pin, code, bio: bioState === "ok", bioUnavailable: bioState === "unavailable" });
     return (React.createElement(React.Fragment, null,
         React.createElement("div", { className: "hello" },
@@ -841,7 +929,9 @@ function Home({ st, reload }) {
             React.createElement(Fingerprint, { size: 56, color: "#007A1F" }),
             React.createElement("h3", null, "Verify Your Identity"),
             React.createElement("p", null, "Use your fingerprint or face unlock to continue."))),
-        step === "pin" && React.createElement(PinPad, { title: "Enter Your PIN", msg: msg || (bioState === "ok" ? "" : ""), busy: busy, onDone: submitPin, onCancel: () => { setStep(null); setMsg(""); } }),
+        step === "pin" && React.createElement(PinPad, { title: "Enter Your PIN", msg: msg, busy: busy, onDone: submitPin, onCancel: () => { setStep(null); setMsg(""); }, onForgot: () => { setMsg(""); setStep("forgot"); } }),
+        step === "changepin" && React.createElement(ChangePin, { onClose: () => setStep(null) }),
+        step === "forgot" && React.createElement(ForgotPin, { onClose: () => setStep(null) }),
         step === "late" && React.createElement(LateForm, { st: st, reload: reload, onClose: () => setStep(null) }),
         !step && (React.createElement(React.Fragment, null,
             done && (React.createElement("div", { className: "sheet ok pop" },
@@ -884,6 +974,11 @@ function Home({ st, reload }) {
                             r.out ? fmt(r.out) : "—"),
                         React.createElement("td", { style: { textAlign: "right" } },
                             React.createElement("span", { className: "tag" + (r.status === "pending" ? " amber" : r.status === "rejected" ? " red" : "") }, r.status === "pending" ? "Pending" : r.status === "approved" ? "Approved" : "Rejected"))))))),
+            React.createElement("div", { className: "row", style: { justifyContent: "center" } },
+                React.createElement("button", { className: "btn small", onClick: () => { setDone(null); setMsg(""); setStep("changepin"); } },
+                    React.createElement(KeyRound, { size: 14 }),
+                    " Change PIN"),
+                React.createElement("button", { className: "btn small", onClick: () => { setDone(null); setMsg(""); setStep("forgot"); } }, "Forgot PIN?")),
             React.createElement("button", { className: "latebanner", onClick: () => { setDone(null); setMsg(""); setStep("late"); } },
                 React.createElement("span", { className: "ic" },
                     React.createElement(Clock, { size: 20 })),
