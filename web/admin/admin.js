@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.3.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -351,10 +351,21 @@ function calcSalary(e, ym, attendance, overtime) {
             otPay += ot.hours * (dp / s.hours) * ot.rate;
         }
     }
-    const leaves = lastS ? lastS.leaves : 0;
+    // Paid leaves are pro-rated when the employee joins or leaves during the month.
+    let empDays = 0;
+    for (let d = 1; d <= dim; d++)
+        if (employed(e, `${ym}-${pad(d)}`))
+            empDays++;
+    const leaves = lastS ? Math.round(lastS.leaves * empDays / dim) : 0;
     const unpaid = absences.slice(leaves);
     const absDed = unpaid.reduce((t, a) => t + a.dp, 0);
-    return { base, present, absences: absences.length, covered: Math.min(leaves, absences.length), unpaid: unpaid.length, absDed, lateCount, lateMins, lateDed, otHours, otPay, payable: base - absDed - lateDed + otPay, inProgress: `${ym}-${pad(dim)}` >= TODAY, daily: lastS ? lastS.salary / dim : 0 };
+    const covered = Math.min(leaves, absences.length);
+    const inProgress = `${ym}-${pad(dim)}` >= TODAY;
+    const daily = lastS ? lastS.salary / dim : 0;
+    // Paid leaves not taken are paid extra at the daily rate, once the month is complete.
+    const unusedLeaves = Math.max(0, leaves - absences.length);
+    const leavePay = inProgress ? 0 : unusedLeaves * daily;
+    return { base, present, absences: absences.length, leaves, covered, unpaid: unpaid.length, absDed, unusedLeaves, leavePay, lateCount, lateMins, lateDed, otHours, otPay, payable: base - absDed - lateDed + otPay + leavePay, inProgress, daily };
 }
 function Copyright() {
     return React.createElement("div", { className: "copy" },
@@ -771,8 +782,26 @@ function workHours(e, ym, attendance, overtime) {
     for (let d = 1; d <= dim; d++)
         if (employed(e, `${ym}-${pad(d)}`))
             empDays++;
-    const allowed = lastS?.monthHours ? lastS.monthHours * 60 * empDays / dim : null;
-    return { rows, worked, scheduled, days, missing, otHours, allowed, prorated: !!allowed && empDays < dim };
+    // Automatic (-1): daily hours on every working day of this month (employees may work their paid leave days, which are paid extra).
+    let allowed = null, autoDays = null;
+    if (lastS && lastS.monthHours === -1) {
+        let mins = 0, workDays = 0;
+        for (let d = 1; d <= dim; d++) {
+            const ds = `${ym}-${pad(d)}`;
+            if (!employed(e, ds))
+                continue;
+            const sd = settingsOn(e, ds);
+            if (!sd || sd.off.includes(weekday(ds)))
+                continue;
+            mins += sd.hours * 60;
+            workDays++;
+        }
+        allowed = mins;
+        autoDays = workDays;
+    }
+    else if (lastS?.monthHours)
+        allowed = lastS.monthHours * 60 * empDays / dim;
+    return { rows, worked, scheduled, days, missing, otHours, allowed, autoDays, prorated: !!allowed && empDays < dim };
 }
 function WorkHoursInner({ db }) {
     const [mode, setMode] = useState("employee");
@@ -854,7 +883,7 @@ function WorkHoursInner({ db }) {
                         r.allowed ? React.createElement(React.Fragment, null,
                             React.createElement("small", null,
                                 allowedCell(r),
-                                r.prorated ? ", pro-rated" : ""),
+                                r.autoDays !== null ? `, automatic (${r.autoDays} working days)` : r.prorated ? ", pro-rated" : ""),
                             React.createElement("div", { className: "bar", "aria-label": `${Math.round(pct)}% of allowed hours used` },
                                 React.createElement("i", { className: r.worked > r.allowed ? "over" : "", style: { width: `${pct}%` } }))) : React.createElement("small", null, "Set in Employees")),
                     React.createElement("div", { className: "stat" },
@@ -1098,12 +1127,13 @@ function RecordsInner({ db, act }) {
                             React.createElement("button", { className: "btn small", onClick: () => { setErr(""); setEdit({ date: ds, in: rec?.in || s.start, out: rec?.out || "", reason: "" }); } }, rec ? "Correct" : "Add Entry")));
                 }))))));
 }
-const blankForm = () => ({ name: "", role: "", pin: "", joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthHours: 208, off: [0], leaves: 2, grace: 10, from: TODAY });
+const blankForm = () => ({ name: "", role: "", pin: "", joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthMode: "auto", monthHours: "", off: [], leaves: 4, grace: 10, from: TODAY });
+const monthText = v => v === -1 ? "Automatic" : v ? `${v} hrs/month` : "No limit";
 function Employees({ db, act }) {
     const [form, setForm] = useState(null);
     const [err, setErr] = useState("");
     const f = (k, v) => setForm({ ...form, [k]: v });
-    const openEdit = e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; setErr(""); setForm({ editId: e.id, name: e.name, role: e.role, pin: "", joined: e.joined, left: e.left || "", ...s, monthHours: s.monthHours ?? "", off: [...s.off], from: TODAY }); };
+    const openEdit = e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; setErr(""); setForm({ editId: e.id, name: e.name, role: e.role, pin: "", joined: e.joined, left: e.left || "", ...s, monthMode: s.monthHours === -1 ? "auto" : s.monthHours ? "fixed" : "none", monthHours: s.monthHours > 0 ? s.monthHours : "", monthHours: s.monthHours ?? "", off: [...s.off], from: TODAY }); };
     const save = async () => {
         const n = ["salary", "hours", "leaves", "grace"];
         const vals = Object.fromEntries(n.map(k => [k, Number(form[k])]));
@@ -1113,13 +1143,13 @@ function Employees({ db, act }) {
             return setErr(form.editId ? "A new PIN must be 4 digits, or leave it blank to keep the current PIN." : "PIN must be 4 digits.");
         if (!form.joined)
             return setErr("Please enter the joining date.");
-        if (form.monthHours !== "" && !(Number(form.monthHours) > 0))
-            return setErr("Allowed hours per month must be a positive number, or left blank.");
+        if (form.monthMode === "fixed" && !(Number(form.monthHours) > 0))
+            return setErr("Enter the allowed hours per month, or choose Automatic or No limit.");
         if (form.left && form.left < form.joined)
             return setErr("The resign date cannot be earlier than the joining date.");
         if (n.some(k => isNaN(vals[k]) || vals[k] < 0) || vals.salary <= 0 || vals.hours <= 0)
             return setErr("Please check the salary, hours, leaves and grace period.");
-        const r = await act("/api/employees/save", { ...form, monthHours: form.monthHours === "" ? "" : Number(form.monthHours) }, setErr);
+        const r = await act("/api/employees/save", { ...form, monthHours: form.monthMode === "auto" ? -1 : form.monthMode === "fixed" ? Number(form.monthHours) : "" }, setErr);
         if (r) {
             setForm(null);
             setErr("");
@@ -1161,7 +1191,13 @@ function Employees({ db, act }) {
                     React.createElement("input", { type: "number", step: "0.5", value: form.hours, onChange: e => f("hours", e.target.value) })),
                 React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Allowed hours per month"),
-                    React.createElement("input", { type: "number", step: "1", placeholder: "No limit", value: form.monthHours, onChange: e => f("monthHours", e.target.value) })),
+                    React.createElement("select", { value: form.monthMode, onChange: e => f("monthMode", e.target.value) },
+                        React.createElement("option", { value: "auto" }, "Automatic"),
+                        React.createElement("option", { value: "fixed" }, "Fixed number"),
+                        React.createElement("option", { value: "none" }, "No limit"))),
+                form.monthMode === "fixed" && React.createElement("div", { className: "field" },
+                    React.createElement("label", null, "Hours per month"),
+                    React.createElement("input", { type: "number", step: "1", value: form.monthHours, onChange: e => f("monthHours", e.target.value) })),
                 React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Paid leaves per month"),
                     React.createElement("input", { type: "number", value: form.leaves, onChange: e => f("leaves", e.target.value) })),
@@ -1171,6 +1207,7 @@ function Employees({ db, act }) {
                 form.editId && React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Effective from"),
                     React.createElement("input", { type: "date", value: form.from, onChange: e => f("from", e.target.value) }))),
+            form.monthMode === "auto" && React.createElement("p", { className: "muted", style: { margin: "0 0 12px", fontSize: 13 } }, "Automatic allowed hours = daily working hours \u00D7 (days in the month \u2212 weekly days off). For example, 10 hours a day with no weekly day off gives 280 hours in a 28-day month, 300 in a 30-day month and 310 in a 31-day month. Paid leaves not taken are paid extra in Payroll."),
             form.start && form.end && overnight(form) && React.createElement("div", { className: "notice", style: { marginBottom: 12 } }, "Night shift: ends the following morning. Attendance is recorded under the shift's start date, and the weekly day off refers to the night the shift would begin."),
             React.createElement("span", { className: "lbl" }, "Weekly day off"),
             React.createElement("div", { className: "chips", style: { marginBottom: 14 } }, DAYS.map((d, i) => React.createElement("button", { key: d, className: form.off.includes(i) ? "on" : "", onClick: () => f("off", form.off.includes(i) ? form.off.filter(x => x !== i) : [...form.off, i]) }, d))),
@@ -1195,7 +1232,7 @@ function Employees({ db, act }) {
                         React.createElement("td", null, rs(h.salary)),
                         React.createElement("td", null, shiftText(h)),
                         React.createElement("td", null, h.hours),
-                        React.createElement("td", null, h.monthHours || "No limit"),
+                        React.createElement("td", null, monthText(h.monthHours)),
                         React.createElement("td", null, h.leaves),
                         React.createElement("td", null,
                             h.grace,
@@ -1237,7 +1274,7 @@ function Employees({ db, act }) {
                         React.createElement("td", { className: "nw" },
                             s.hours,
                             " hrs/day",
-                            React.createElement("div", { className: "muted" }, s.monthHours ? `${s.monthHours} hrs/month` : "No monthly limit")),
+                            React.createElement("div", { className: "muted" }, s.monthHours === -1 ? "Automatic monthly hours" : s.monthHours ? `${s.monthHours} hrs/month` : "No monthly limit")),
                         React.createElement("td", null, s.off.map(i => DAYS[i]).join(", ") || "None"),
                         React.createElement("td", { className: "nw" },
                             s.leaves,
@@ -1415,7 +1452,7 @@ function Salary({ db }) {
     const inProgress = rows[0]?.c.inProgress;
     return (React.createElement(React.Fragment, null,
         React.createElement("h1", null, "Payroll"),
-        React.createElement("p", { className: "sub" }, "Daily rate is the monthly salary divided by the days in the month. Unpaid absences and late minutes beyond the grace period are deducted, and only approved overtime is added. Select an employee to view the full calculation."),
+        React.createElement("p", { className: "sub" }, "Daily rate is the monthly salary divided by the days in the month. Absences beyond the paid leaves and late minutes beyond the grace period are deducted. Paid leaves not taken are paid extra at the daily rate when the month ends, and approved overtime is added. Select an employee to view the full calculation."),
         React.createElement("div", { className: "printhead" },
             "Haazir, eco Pharmacy: Payroll for ",
             monthName(month),
@@ -1427,9 +1464,9 @@ function Salary({ db }) {
             React.createElement(MonthPick, { value: month, onChange: v => { setMonth(v); setOpen(null); } }),
             inProgress && React.createElement("span", { className: "tag amber" }, "In Progress: Calculated to Yesterday"),
             React.createElement(ExportButtons, { onExcel: () => saveBlob(makeXlsx("Payroll " + month, [
-                    ["Employee ID", "Name", "Month", "Salary for Month", "Daily Rate", "Days Present", "Absences", "Covered by Paid Leave", "Unpaid Absences", "Absence Deduction", "Times Late", "Minutes Late (beyond grace)", "Late Deduction", "Approved Overtime (hrs)", "Overtime Pay", "Net Payable"],
-                    ...rows.map(({ e, c }) => [e.id, e.name, monthName(month), r2(c.base), r2(c.daily), c.present, c.absences, c.covered, c.unpaid, r2(c.absDed), c.lateCount, c.lateMins, r2(c.lateDed), c.otHours, r2(c.otPay), r2(c.payable)]),
-                    ["", "Total", "", "", "", "", "", "", "", "", "", "", "", "", "", r2(total)],
+                    ["Employee ID", "Name", "Month", "Salary for Month", "Daily Rate", "Days Present", "Absences", "Covered by Paid Leave", "Unpaid Absences", "Absence Deduction", "Times Late", "Minutes Late (beyond grace)", "Late Deduction", "Unused Paid Leaves", "Unused Leave Pay", "Approved Overtime (hrs)", "Overtime Pay", "Net Payable"],
+                    ...rows.map(({ e, c }) => [e.id, e.name, monthName(month), r2(c.base), r2(c.daily), c.present, c.absences, c.covered, c.unpaid, r2(c.absDed), c.lateCount, c.lateMins, r2(c.lateDed), c.inProgress ? "At month end" : c.unusedLeaves, r2(c.leavePay), c.otHours, r2(c.otPay), r2(c.payable)]),
+                    ["", "Total", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", r2(total)],
                 ]), `Haazir Payroll ${month}.xlsx`) })),
         React.createElement("div", { className: "panel" },
             React.createElement("table", { className: "t" },
@@ -1439,6 +1476,7 @@ function Salary({ db }) {
                         React.createElement("th", { className: "r" }, "Salary"),
                         React.createElement("th", { className: "r" }, "Absences"),
                         React.createElement("th", { className: "r" }, "Late"),
+                        React.createElement("th", { className: "r" }, "Unused Leave"),
                         React.createElement("th", { className: "r" }, "Overtime"),
                         React.createElement("th", { className: "r" }, "Net Payable"))),
                 React.createElement("tbody", null,
@@ -1450,11 +1488,12 @@ function Salary({ db }) {
                             React.createElement("td", { className: "r" }, rs(c.base)),
                             React.createElement("td", { className: "r" }, c.absDed ? "− " + rs(c.absDed) : "—"),
                             React.createElement("td", { className: "r" }, c.lateDed ? "− " + rs(c.lateDed) : "—"),
+                            React.createElement("td", { className: "r" }, c.leavePay ? "+ " + rs(c.leavePay) : c.inProgress ? React.createElement("span", { className: "muted" }, "Month end") : "—"),
                             React.createElement("td", { className: "r" }, c.otPay ? "+ " + rs(c.otPay) : "—"),
                             React.createElement("td", { className: "r" },
                                 React.createElement("b", null, rs(c.payable)))),
                         open === e.id && React.createElement("tr", { key: e.id + "x" },
-                            React.createElement("td", { colSpan: 6 },
+                            React.createElement("td", { colSpan: 7 },
                                 React.createElement("div", { className: "breakdown" },
                                     React.createElement("div", null,
                                         React.createElement("span", null,
@@ -1474,9 +1513,14 @@ function Salary({ db }) {
                                             c.absences,
                                             ", covered by paid leave: ",
                                             c.covered,
+                                            " of ",
+                                            c.leaves,
                                             ", unpaid: ",
                                             c.unpaid),
                                         React.createElement("span", null, c.absDed ? "− " + rs(c.absDed) : "Rs 0")),
+                                    React.createElement("div", null,
+                                        React.createElement("span", null, c.inProgress ? `Unused paid leaves: calculated when the month ends (${Math.max(0, c.leaves - c.absences)} unused so far)` : `Unused paid leaves: ${c.unusedLeaves} × daily rate`),
+                                        React.createElement("span", null, c.leavePay ? "+ " + rs(c.leavePay) : "Rs 0")),
                                     React.createElement("div", null,
                                         React.createElement("span", null,
                                             "Late ",
@@ -1496,7 +1540,7 @@ function Salary({ db }) {
                                         React.createElement("span", null, rs(c.payable)))))),
                     ]),
                     React.createElement("tr", { className: "total" },
-                        React.createElement("td", { colSpan: 5 }, "Total Payable"),
+                        React.createElement("td", { colSpan: 6 }, "Total Payable"),
                         React.createElement("td", { className: "r" }, rs(total))))))));
 }
 function NetworkTab({ db, act }) {

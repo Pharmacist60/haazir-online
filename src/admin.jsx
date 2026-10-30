@@ -114,8 +114,19 @@ function workHours(e, ym, attendance, overtime) {
   const lastS = settingsOn(e, `${ym}-${pad(dim)}`) || rows[rows.length - 1]?.s;
   // Allowed hours are pro-rated when the employee joins or leaves during the month.
   let empDays = 0; for (let d = 1; d <= dim; d++) if (employed(e, `${ym}-${pad(d)}`)) empDays++;
-  const allowed = lastS?.monthHours ? lastS.monthHours * 60 * empDays / dim : null;
-  return { rows, worked, scheduled, days, missing, otHours, allowed, prorated: !!allowed && empDays < dim };
+  // Automatic (-1): daily hours on every working day of this month (employees may work their paid leave days, which are paid extra).
+  let allowed = null, autoDays = null;
+  if (lastS && lastS.monthHours === -1) {
+    let mins = 0, workDays = 0;
+    for (let d = 1; d <= dim; d++) {
+      const ds = `${ym}-${pad(d)}`; if (!employed(e, ds)) continue;
+      const sd = settingsOn(e, ds); if (!sd || sd.off.includes(weekday(ds))) continue;
+      mins += sd.hours * 60; workDays++;
+    }
+    allowed = mins;
+    autoDays = workDays;
+  } else if (lastS?.monthHours) allowed = lastS.monthHours * 60 * empDays / dim;
+  return { rows, worked, scheduled, days, missing, otHours, allowed, autoDays, prorated: !!allowed && empDays < dim };
 }
 
 function WorkHoursInner({ db }) {
@@ -168,7 +179,7 @@ function WorkHoursInner({ db }) {
               <div className="stat"><span>Hours worked</span><b>{hm(r.worked)}</b><small>{r.days} days with full records</small></div>
               <div className="stat"><span>Scheduled to date</span><b>{hm(r.scheduled)}</b><small className={diff >= 0 ? "pos" : "neg"}>{diff >= 0 ? `${hm(diff)} extra` : `${hm(-diff)} short`}</small></div>
               <div className="stat"><span>Allowed this month</span><b>{r.allowed ? hm(r.allowed) : "No limit"}</b>
-                {r.allowed ? <><small>{allowedCell(r)}{r.prorated ? ", pro-rated" : ""}</small><div className="bar" aria-label={`${Math.round(pct)}% of allowed hours used`}><i className={r.worked > r.allowed ? "over" : ""} style={{ width: `${pct}%` }} /></div></> : <small>Set in Employees</small>}</div>
+                {r.allowed ? <><small>{allowedCell(r)}{r.autoDays !== null ? `, automatic (${r.autoDays} working days)` : r.prorated ? ", pro-rated" : ""}</small><div className="bar" aria-label={`${Math.round(pct)}% of allowed hours used`}><i className={r.worked > r.allowed ? "over" : ""} style={{ width: `${pct}%` }} /></div></> : <small>Set in Employees</small>}</div>
               <div className="stat"><span>Approved overtime</span><b>{r.otHours} hrs</b><small>{r.missing > 0 ? <span className="neg">{r.missing} day{r.missing > 1 ? "s" : ""} missing check-out</span> : "All records complete"}</small></div>
             </div>
             <div className="panel">
@@ -303,21 +314,22 @@ function RecordsInner({ db, act }) {
   );
 }
 
-const blankForm = () => ({ name: "", role: "", pin: "", joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthHours: 208, off: [0], leaves: 2, grace: 10, from: TODAY });
+const blankForm = () => ({ name: "", role: "", pin: "", joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthMode: "auto", monthHours: "", off: [], leaves: 4, grace: 10, from: TODAY });
+const monthText = v => v === -1 ? "Automatic" : v ? `${v} hrs/month` : "No limit";
 
 function Employees({ db, act }) {
   const [form, setForm] = useState(null); const [err, setErr] = useState("");
   const f = (k, v) => setForm({ ...form, [k]: v });
-  const openEdit = e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; setErr(""); setForm({ editId: e.id, name: e.name, role: e.role, pin: "", joined: e.joined, left: e.left || "", ...s, monthHours: s.monthHours ?? "", off: [...s.off], from: TODAY }); };
+  const openEdit = e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; setErr(""); setForm({ editId: e.id, name: e.name, role: e.role, pin: "", joined: e.joined, left: e.left || "", ...s, monthMode: s.monthHours === -1 ? "auto" : s.monthHours ? "fixed" : "none", monthHours: s.monthHours > 0 ? s.monthHours : "", monthHours: s.monthHours ?? "", off: [...s.off], from: TODAY }); };
   const save = async () => {
     const n = ["salary", "hours", "leaves", "grace"]; const vals = Object.fromEntries(n.map(k => [k, Number(form[k])]));
     if (!form.name.trim()) return setErr("Please enter the employee's name.");
     if (form.editId ? form.pin && !/^\d{4}$/.test(form.pin) : !/^\d{4}$/.test(form.pin)) return setErr(form.editId ? "A new PIN must be 4 digits, or leave it blank to keep the current PIN." : "PIN must be 4 digits.");
     if (!form.joined) return setErr("Please enter the joining date.");
-    if (form.monthHours !== "" && !(Number(form.monthHours) > 0)) return setErr("Allowed hours per month must be a positive number, or left blank.");
+    if (form.monthMode === "fixed" && !(Number(form.monthHours) > 0)) return setErr("Enter the allowed hours per month, or choose Automatic or No limit.");
     if (form.left && form.left < form.joined) return setErr("The resign date cannot be earlier than the joining date.");
     if (n.some(k => isNaN(vals[k]) || vals[k] < 0) || vals.salary <= 0 || vals.hours <= 0) return setErr("Please check the salary, hours, leaves and grace period.");
-    const r = await act("/api/employees/save", { ...form, monthHours: form.monthHours === "" ? "" : Number(form.monthHours) }, setErr);
+    const r = await act("/api/employees/save", { ...form, monthHours: form.monthMode === "auto" ? -1 : form.monthMode === "fixed" ? Number(form.monthHours) : "" }, setErr);
     if (r) { setForm(null); setErr(""); }
   };
   const editing = form?.editId && db.employees.find(e => e.id === form.editId);
@@ -338,11 +350,15 @@ function Employees({ db, act }) {
             <div className="field"><label>Shift start</label><input type="time" value={form.start} onChange={e => f("start", e.target.value)} /></div>
             <div className="field"><label>Shift end</label><input type="time" value={form.end} onChange={e => f("end", e.target.value)} /></div>
             <div className="field"><label>Daily working hours</label><input type="number" step="0.5" value={form.hours} onChange={e => f("hours", e.target.value)} /></div>
-            <div className="field"><label>Allowed hours per month</label><input type="number" step="1" placeholder="No limit" value={form.monthHours} onChange={e => f("monthHours", e.target.value)} /></div>
+            <div className="field"><label>Allowed hours per month</label>
+              <select value={form.monthMode} onChange={e => f("monthMode", e.target.value)}>
+                <option value="auto">Automatic</option><option value="fixed">Fixed number</option><option value="none">No limit</option></select></div>
+            {form.monthMode === "fixed" && <div className="field"><label>Hours per month</label><input type="number" step="1" value={form.monthHours} onChange={e => f("monthHours", e.target.value)} /></div>}
             <div className="field"><label>Paid leaves per month</label><input type="number" value={form.leaves} onChange={e => f("leaves", e.target.value)} /></div>
             <div className="field"><label>Grace period (minutes)</label><input type="number" value={form.grace} onChange={e => f("grace", e.target.value)} /></div>
             {form.editId && <div className="field"><label>Effective from</label><input type="date" value={form.from} onChange={e => f("from", e.target.value)} /></div>}
           </div>
+          {form.monthMode === "auto" && <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>Automatic allowed hours = daily working hours × (days in the month − weekly days off). For example, 10 hours a day with no weekly day off gives 280 hours in a 28-day month, 300 in a 30-day month and 310 in a 31-day month. Paid leaves not taken are paid extra in Payroll.</p>}
           {form.start && form.end && overnight(form) && <div className="notice" style={{ marginBottom: 12 }}>Night shift: ends the following morning. Attendance is recorded under the shift's start date, and the weekly day off refers to the night the shift would begin.</div>}
           <span className="lbl">Weekly day off</span>
           <div className="chips" style={{ marginBottom: 14 }}>{DAYS.map((d, i) => <button key={d} className={form.off.includes(i) ? "on" : ""} onClick={() => f("off", form.off.includes(i) ? form.off.filter(x => x !== i) : [...form.off, i])}>{d}</button>)}</div>
@@ -350,7 +366,7 @@ function Employees({ db, act }) {
           {err && <div className="err">{err}</div>}
           {editing && <><h2 style={{ marginTop: 20 }}>Settings History</h2>
             <table className="t"><thead><tr><th>Effective From</th><th>Salary</th><th>Shift</th><th>Hours/Day</th><th>Hours/Month</th><th>Paid Leaves</th><th>Grace</th></tr></thead>
-              <tbody>{editing.history.slice().reverse().map(h => <tr key={h.from}><td>{niceDate(h.from)}</td><td>{rs(h.salary)}</td><td>{shiftText(h)}</td><td>{h.hours}</td><td>{h.monthHours || "No limit"}</td><td>{h.leaves}</td><td>{h.grace} min</td></tr>)}</tbody></table></>}
+              <tbody>{editing.history.slice().reverse().map(h => <tr key={h.from}><td>{niceDate(h.from)}</td><td>{rs(h.salary)}</td><td>{shiftText(h)}</td><td>{h.hours}</td><td>{monthText(h.monthHours)}</td><td>{h.leaves}</td><td>{h.grace} min</td></tr>)}</tbody></table></>}
         </div>
       ) : <div style={{ marginBottom: 18 }}><button className="btn primary" onClick={() => { setErr(""); setForm(blankForm()); }}>Add Employee</button></div>}
       <div className="panel">
@@ -358,7 +374,7 @@ function Employees({ db, act }) {
           <tbody>{[...db.employees].sort((a, b) => isGone(a) - isGone(b)).map(e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; return (
             <tr key={e.id}><td><b>{e.name}</b><div className="muted">{e.role}</div><div className="muted">{e.id}</div></td>
               <td className="nw">Joined {longDate(e.joined)}{e.left && <div style={{ marginTop: 4 }}>{isGone(e) ? <span className="tag grey">Resigned</span> : <span className="tag amber">Leaving</span>} <span className="muted">{longDate(e.left)}</span></div>}</td>
-              <td className="nw">{rs(s.salary)}</td><td className="nw">{fmt(s.start)} – {fmt(s.end)}{overnight(s) && <div className="muted">Night shift</div>}</td><td className="nw">{s.hours} hrs/day<div className="muted">{s.monthHours ? `${s.monthHours} hrs/month` : "No monthly limit"}</div></td><td>{s.off.map(i => DAYS[i]).join(", ") || "None"}</td><td className="nw">{s.leaves} / month</td><td className="nw">{s.grace} min</td>
+              <td className="nw">{rs(s.salary)}</td><td className="nw">{fmt(s.start)} – {fmt(s.end)}{overnight(s) && <div className="muted">Night shift</div>}</td><td className="nw">{s.hours} hrs/day<div className="muted">{s.monthHours === -1 ? "Automatic monthly hours" : s.monthHours ? `${s.monthHours} hrs/month` : "No monthly limit"}</div></td><td>{s.off.map(i => DAYS[i]).join(", ") || "None"}</td><td className="nw">{s.leaves} / month</td><td className="nw">{s.grace} min</td>
               <td><button className="btn small" onClick={() => openEdit(e)}>Edit</button></td></tr>); })}</tbody></table>
       </div>
     </>
@@ -462,34 +478,36 @@ function Salary({ db }) {
   return (
     <>
       <h1>Payroll</h1>
-      <p className="sub">Daily rate is the monthly salary divided by the days in the month. Unpaid absences and late minutes beyond the grace period are deducted, and only approved overtime is added. Select an employee to view the full calculation.</p>
+      <p className="sub">Daily rate is the monthly salary divided by the days in the month. Absences beyond the paid leaves and late minutes beyond the grace period are deducted. Paid leaves not taken are paid extra at the daily rate when the month ends, and approved overtime is added. Select an employee to view the full calculation.</p>
       <div className="printhead">Haazir, eco Pharmacy: Payroll for {monthName(month)}{inProgress ? " (in progress, calculated to yesterday)" : ""}. Printed {longDate(TODAY)}.</div>
       <div className="row" style={{ marginBottom: 14, alignItems: "center" }}><MonthPick value={month} onChange={v => { setMonth(v); setOpen(null); }} />
         {inProgress && <span className="tag amber">In Progress: Calculated to Yesterday</span>}
         <ExportButtons onExcel={() => saveBlob(makeXlsx("Payroll " + month, [
-          ["Employee ID", "Name", "Month", "Salary for Month", "Daily Rate", "Days Present", "Absences", "Covered by Paid Leave", "Unpaid Absences", "Absence Deduction", "Times Late", "Minutes Late (beyond grace)", "Late Deduction", "Approved Overtime (hrs)", "Overtime Pay", "Net Payable"],
-          ...rows.map(({ e, c }) => [e.id, e.name, monthName(month), r2(c.base), r2(c.daily), c.present, c.absences, c.covered, c.unpaid, r2(c.absDed), c.lateCount, c.lateMins, r2(c.lateDed), c.otHours, r2(c.otPay), r2(c.payable)]),
-          ["", "Total", "", "", "", "", "", "", "", "", "", "", "", "", "", r2(total)],
+          ["Employee ID", "Name", "Month", "Salary for Month", "Daily Rate", "Days Present", "Absences", "Covered by Paid Leave", "Unpaid Absences", "Absence Deduction", "Times Late", "Minutes Late (beyond grace)", "Late Deduction", "Unused Paid Leaves", "Unused Leave Pay", "Approved Overtime (hrs)", "Overtime Pay", "Net Payable"],
+          ...rows.map(({ e, c }) => [e.id, e.name, monthName(month), r2(c.base), r2(c.daily), c.present, c.absences, c.covered, c.unpaid, r2(c.absDed), c.lateCount, c.lateMins, r2(c.lateDed), c.inProgress ? "At month end" : c.unusedLeaves, r2(c.leavePay), c.otHours, r2(c.otPay), r2(c.payable)]),
+          ["", "Total", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", r2(total)],
         ]), `Haazir Payroll ${month}.xlsx`)} />
       </div>
       <div className="panel">
-        <table className="t"><thead><tr><th>Employee</th><th className="r">Salary</th><th className="r">Absences</th><th className="r">Late</th><th className="r">Overtime</th><th className="r">Net Payable</th></tr></thead>
+        <table className="t"><thead><tr><th>Employee</th><th className="r">Salary</th><th className="r">Absences</th><th className="r">Late</th><th className="r">Unused Leave</th><th className="r">Overtime</th><th className="r">Net Payable</th></tr></thead>
           <tbody>{rows.map(({ e, c }) => [
             <tr key={e.id} className="click" onClick={() => setOpen(open === e.id ? null : e.id)}>
               <td><b>{e.name}</b><div className="muted">{e.id}</div></td><td className="r">{rs(c.base)}</td>
               <td className="r">{c.absDed ? "− " + rs(c.absDed) : "—"}</td><td className="r">{c.lateDed ? "− " + rs(c.lateDed) : "—"}</td>
+              <td className="r">{c.leavePay ? "+ " + rs(c.leavePay) : c.inProgress ? <span className="muted">Month end</span> : "—"}</td>
               <td className="r">{c.otPay ? "+ " + rs(c.otPay) : "—"}</td><td className="r"><b>{rs(c.payable)}</b></td></tr>,
-            open === e.id && <tr key={e.id + "x"}><td colSpan={6}><div className="breakdown">
+            open === e.id && <tr key={e.id + "x"}><td colSpan={7}><div className="breakdown">
               <div><span>Salary for {monthName(month)}{e.history.length > 1 || e.joined.startsWith(month) || e.left?.startsWith(month) ? " (adjusted for changes, joining or resign date)" : ""}</span><span>{rs(c.base)}</span></div>
               <div><span>Daily rate</span><span>{rs(c.daily)}</span></div>
               <div><span>Days present</span><span>{c.present}</span></div>
-              <div><span>Absences: {c.absences}, covered by paid leave: {c.covered}, unpaid: {c.unpaid}</span><span>{c.absDed ? "− " + rs(c.absDed) : "Rs 0"}</span></div>
+              <div><span>Absences: {c.absences}, covered by paid leave: {c.covered} of {c.leaves}, unpaid: {c.unpaid}</span><span>{c.absDed ? "− " + rs(c.absDed) : "Rs 0"}</span></div>
+              <div><span>{c.inProgress ? `Unused paid leaves: calculated when the month ends (${Math.max(0, c.leaves - c.absences)} unused so far)` : `Unused paid leaves: ${c.unusedLeaves} × daily rate`}</span><span>{c.leavePay ? "+ " + rs(c.leavePay) : "Rs 0"}</span></div>
               <div><span>Late {c.lateCount} times, {c.lateMins} min beyond grace</span><span>{c.lateDed ? "− " + rs(c.lateDed) : "Rs 0"}</span></div>
               <div><span>Approved overtime: {c.otHours} hrs</span><span>{c.otPay ? "+ " + rs(c.otPay) : "Rs 0"}</span></div>
               <div className="pay"><span>Net payable</span><span>{rs(c.payable)}</span></div>
             </div></td></tr>,
           ])}
-            <tr className="total"><td colSpan={5}>Total Payable</td><td className="r">{rs(total)}</td></tr></tbody></table>
+            <tr className="total"><td colSpan={6}>Total Payable</td><td className="r">{rs(total)}</td></tr></tbody></table>
       </div>
     </>
   );

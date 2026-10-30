@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.3.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -351,10 +351,21 @@ function calcSalary(e, ym, attendance, overtime) {
             otPay += ot.hours * (dp / s.hours) * ot.rate;
         }
     }
-    const leaves = lastS ? lastS.leaves : 0;
+    // Paid leaves are pro-rated when the employee joins or leaves during the month.
+    let empDays = 0;
+    for (let d = 1; d <= dim; d++)
+        if (employed(e, `${ym}-${pad(d)}`))
+            empDays++;
+    const leaves = lastS ? Math.round(lastS.leaves * empDays / dim) : 0;
     const unpaid = absences.slice(leaves);
     const absDed = unpaid.reduce((t, a) => t + a.dp, 0);
-    return { base, present, absences: absences.length, covered: Math.min(leaves, absences.length), unpaid: unpaid.length, absDed, lateCount, lateMins, lateDed, otHours, otPay, payable: base - absDed - lateDed + otPay, inProgress: `${ym}-${pad(dim)}` >= TODAY, daily: lastS ? lastS.salary / dim : 0 };
+    const covered = Math.min(leaves, absences.length);
+    const inProgress = `${ym}-${pad(dim)}` >= TODAY;
+    const daily = lastS ? lastS.salary / dim : 0;
+    // Paid leaves not taken are paid extra at the daily rate, once the month is complete.
+    const unusedLeaves = Math.max(0, leaves - absences.length);
+    const leavePay = inProgress ? 0 : unusedLeaves * daily;
+    return { base, present, absences: absences.length, leaves, covered, unpaid: unpaid.length, absDed, unusedLeaves, leavePay, lateCount, lateMins, lateDed, otHours, otPay, payable: base - absDed - lateDed + otPay + leavePay, inProgress, daily };
 }
 function Copyright() {
     return React.createElement("div", { className: "copy" },

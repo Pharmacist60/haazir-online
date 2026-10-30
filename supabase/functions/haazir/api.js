@@ -5,7 +5,7 @@ import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
 import * as L from './logic.js';
 
-export const VERSION = '1.1.0';
+export const VERSION = '1.3.0';
 
 /* ---------------- database layout ---------------- */
 // Every table, with its columns. Used to create the database, and to back up and restore it.
@@ -364,12 +364,12 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     need(num('salary') > 0 && num('hours') > 0 && num('leaves') >= 0 && num('grace') >= 0, 'Please check the salary, hours, leaves and grace period.');
     need(L.isTime(b.start) && L.isTime(b.end), 'Please enter the shift start and end times.');
     const monthHours = b.monthHours === '' || b.monthHours == null ? null : Number(b.monthHours);
-    need(monthHours === null || monthHours > 0, 'Allowed hours per month must be a positive number, or left blank.');
+    need(monthHours === null || monthHours > 0 || monthHours === -1, 'Allowed hours per month must be a positive number, Automatic, or No limit.');
     const off = (Array.isArray(b.off) ? b.off : []).map(Number).filter(n => n >= 0 && n <= 6);
     const from = old ? b.from : b.joined; need(L.isDate(from), 'Choose the date these settings take effect.');
     const entry = { from, salary: num('salary'), start: b.start, end: b.end, hours: num('hours'), monthHours, off, leaves: Math.round(num('leaves')), grace: Math.round(num('grace')) };
     const by = adminLabel(a);
-    const summary = `${rs(entry.salary)}, ${L.shiftText(entry)}, ${entry.hours} hrs/day, ${entry.monthHours ? entry.monthHours + ' hrs/month allowed' : 'no monthly hours limit'}, ${entry.leaves} paid leaves/month, ${entry.grace} min grace`;
+    const summary = `${rs(entry.salary)}, ${L.shiftText(entry)}, ${entry.hours} hrs/day, ${entry.monthHours === -1 ? 'automatic monthly hours' : entry.monthHours ? entry.monthHours + ' hrs/month allowed' : 'no monthly hours limit'}, ${entry.leaves} paid leaves/month, ${entry.grace} min grace`;
     await db.tx(async t => {
       const q = (sql, ...p) => t.all(sql, p);
       const saveSettings = id => q(`INSERT INTO emp_settings (emp_id, eff_from, salary, start_time, end_time, hours, month_hours, off_days, leaves, grace) VALUES (?,?,?,?,?,?,?,?,?,?)
