@@ -311,7 +311,8 @@ function RecordsInner({ db, act }) {
                 <td><div className="row"><button className="btn small primary" onClick={save}>Save</button><button className="btn small" onClick={() => { setEdit(null); setErr(""); }}>Cancel</button></div></td></tr>
             );
             const lm = rec ? lateBeyond(rec, s) : 0;
-            const st = off ? <span className="tag grey">Day Off</span> : !rec && ds < TRACK_START ? <span className="tag grey">Before Tracking</span> : !rec ? (ds === TODAY ? <span className="tag grey">Today</span> : <span className="tag red">Absent</span>) : !rec.out && ds < YEST ? <span className="tag red">No Check-Out</span> : lm > 0 ? <span className="tag amber">Late by {minText(lm)}</span> : <span className="tag">On Time</span>;
+            const dk = rec ? dayKind(rec, s) : null;
+            const st = off ? <span className="tag grey">Day Off</span> : !rec && ds < TRACK_START ? <span className="tag grey">Before Tracking</span> : !rec ? (ds === TODAY ? <span className="tag grey">Today</span> : <span className="tag red">Absent</span>) : dk.kind === "half" ? <span className="tag amber">Half Day (left {minText(dk.early)} early)</span> : dk.kind === "short" ? <span className="tag red">Short Day (left {minText(dk.early)} early)</span> : !rec.out && ds < YEST ? <span className="tag red">No Check-Out</span> : lm > 0 ? <span className="tag amber">Late by {minText(lm)}</span> : <span className="tag">On Time</span>;
             return <tr key={ds}><td>{niceDate(ds)}</td><td>{rec ? timeText(rec.in, s) : "—"}</td><td>{rec ? timeText(rec.out, s) : "—"}</td><td>{rec?.method || "—"}</td><td>{st}</td>
               <td><div className="row" style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
                 <button className="btn small" onClick={() => { setErr(""); setEdit({ date: ds, in: rec?.in || s.start, out: rec?.out || "", reason: "" }); }}>{rec ? "Edit" : "Add Entry"}</button>
@@ -322,7 +323,7 @@ function RecordsInner({ db, act }) {
   );
 }
 
-const blankForm = () => ({ name: "", role: "", pin: "", notes: "", joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthMode: "auto", monthHours: "", off: [], leaves: 4, grace: 10, from: TODAY });
+const blankForm = () => ({ name: "", role: "", pin: "", notes: "", joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthMode: "auto", monthHours: "", off: [], leaves: 0, grace: 10, from: TODAY });
 const monthText = v => v === -1 ? "Automatic" : v ? `${v} hrs/month` : "No limit";
 
 function Employees({ db, act }) {
@@ -489,37 +490,38 @@ function Salary({ db }) {
   return (
     <>
       <h1>Payroll</h1>
-      <p className="sub">Daily rate is the monthly salary divided by the days in the month. For the current month, Net Payable assumes the remaining days are worked. Absences beyond the paid leaves and late minutes beyond the grace period are deducted. Paid leaves not taken are paid extra at the daily rate when the month ends, and approved overtime is added. Select an employee to view the full calculation.</p>
+      <p className="sub">Daily rate is the monthly salary divided by the days in the month. Earned So Far covers the days completed up to now; Net Payable is the full month if every remaining day is worked. Leaving early beyond the early leave grace counts as a half day or an absence (see Admins & Security). Absences beyond the paid leaves and late minutes beyond the grace period are deducted. Paid leaves not taken are paid extra at the daily rate when the month ends, and approved overtime is added. Select an employee to view the full calculation.</p>
       <div className="printhead">Haazir, eco Pharmacy: Payroll for {monthName(month)}{inProgress ? " (in progress, calculated to yesterday)" : ""}. Printed {longDate(TODAY)}.</div>
       <div className="row" style={{ marginBottom: 14, alignItems: "center" }}><MonthPick value={month} onChange={v => { setMonth(v); setOpen(null); }} />
         {inProgress && <span className="tag amber">In Progress: Deductions to Yesterday</span>}
         <ExportButtons onExcel={() => saveBlob(makeXlsx("Payroll " + month, [
-          ["Employee ID", "Name", "Month", "Salary for Month", "Daily Rate", "Days Present", "Absences", "Covered by Paid Leave", "Unpaid Absences", "Absence Deduction", "Times Late", "Minutes Late (beyond grace)", "Late Deduction", "Unused Paid Leaves", "Unused Leave Pay", "Approved Overtime (hrs)", "Overtime Pay", "Net Payable"],
-          ...rows.map(({ e, c }) => [e.id, e.name, monthName(month), r2(c.base), r2(c.daily), c.present, c.absences, c.covered, c.unpaid, r2(c.absDed), c.lateCount, c.lateMins, r2(c.lateDed), c.inProgress ? "At month end" : c.unusedLeaves, r2(c.leavePay), c.otHours, r2(c.otPay), r2(c.payable)]),
-          ["", "Total", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", r2(total)],
+          ["Employee ID", "Name", "Month", "Salary for Month", "Daily Rate", "Days Present", "Absences", "Half Days", "Short Days", "Leave Days Covered", "Unpaid Days", "Absence Deduction", "Times Late", "Minutes Late (beyond grace)", "Late Deduction", "Unused Paid Leaves", "Unused Leave Pay", "Approved Overtime (hrs)", "Overtime Pay", "Earned So Far", "Net Payable"],
+          ...rows.map(({ e, c }) => [e.id, e.name, monthName(month), r2(c.base), r2(c.daily), c.present, c.absences, c.halfDays, c.shortDays, c.covered, c.unpaid, r2(c.absDed), c.lateCount, c.lateMins, r2(c.lateDed), c.inProgress ? "At month end" : c.unusedLeaves, r2(c.leavePay), c.otHours, r2(c.otPay), r2(c.earned), r2(c.payable)]),
+          ["", "Total", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", r2(rows.reduce((t, r) => t + r.c.earned, 0)), r2(total)],
         ]), `Haazir Payroll ${month}.xlsx`)} />
       </div>
       <div className="panel">
-        <table className="t"><thead><tr><th>Employee</th><th className="r">Salary</th><th className="r">Absences</th><th className="r">Late</th><th className="r">Unused Leave</th><th className="r">Overtime</th><th className="r">Net Payable</th></tr></thead>
+        <table className="t"><thead><tr><th>Employee</th><th className="r">Salary</th><th className="r">Absences</th><th className="r">Late</th><th className="r">Unused Leave</th><th className="r">Overtime</th><th className="r">Earned So Far</th><th className="r">Net Payable</th></tr></thead>
           <tbody>{rows.map(({ e, c }) => [
             <tr key={e.id} className="click" onClick={() => setOpen(open === e.id ? null : e.id)}>
               <td><b>{e.name}</b><div className="muted">{e.id}</div></td><td className="r">{rs(c.base)}</td>
               <td className="r">{c.absDed ? "− " + rs(c.absDed) : "—"}</td><td className="r">{c.lateDed ? "− " + rs(c.lateDed) : "—"}</td>
               <td className="r">{c.leavePay ? "+ " + rs(c.leavePay) : c.inProgress ? <span className="muted">Month end</span> : "—"}</td>
-              <td className="r">{c.otPay ? "+ " + rs(c.otPay) : "—"}</td><td className="r"><b>{rs(c.payable)}</b></td></tr>,
-            open === e.id && <tr key={e.id + "x"}><td colSpan={7}><div className="breakdown">
+              <td className="r">{c.otPay ? "+ " + rs(c.otPay) : "—"}</td><td className="r">{rs(c.earned)}</td><td className="r"><b>{rs(c.payable)}</b></td></tr>,
+            open === e.id && <tr key={e.id + "x"}><td colSpan={8}><div className="breakdown">
               <div><span>Salary for {c.empDays === c.dim ? `all of ${monthName(month)}` : `${c.empDays} of ${c.dim} days in ${monthName(month)} (${niceDate(c.firstDay)} to ${niceDate(c.lastDay)})`}{c.inProgress ? ", if every remaining day is worked" : ""}</span><span>{rs(c.base)}</span></div>
               <div><span>Daily rate</span><span>{rs(c.daily)}</span></div>
               {c.untracked > 0 && <div><span>Paid in full before attendance tracking started ({longDate(TRACK_START)}): {c.untracked} days</span><span>Rs 0</span></div>}
               <div><span>Days present</span><span>{c.present}</span></div>
-              <div><span>Absences: {c.absences}, covered by paid leave: {c.covered} of {c.leaves}, unpaid: {c.unpaid}</span><span>{c.absDed ? "− " + rs(c.absDed) : "Rs 0"}</span></div>
-              <div><span>{c.inProgress ? `Unused paid leaves: calculated when the month ends (${Math.max(0, c.leaves - c.absences)} unused so far)` : `Unused paid leaves: ${c.unusedLeaves} × daily rate`}</span><span>{c.leavePay ? "+ " + rs(c.leavePay) : "Rs 0"}</span></div>
+              <div><span>Absences: {c.absences}{c.halfDays ? `, half days: ${c.halfDays}` : ""}{c.shortDays ? `, short days (counted as absent): ${c.shortDays}` : ""}. Paid leave used: {c.covered} of {c.leaves}; unpaid: {c.unpaid} day{c.unpaid === 1 ? "" : "s"}</span><span>{c.absDed ? "− " + rs(c.absDed) : "Rs 0"}</span></div>
+              <div><span>{c.inProgress ? `Unused paid leaves: calculated when the month ends (${Math.max(0, c.leaves - c.usedUnits)} unused so far)` : `Unused paid leaves: ${c.unusedLeaves} × daily rate`}</span><span>{c.leavePay ? "+ " + rs(c.leavePay) : "Rs 0"}</span></div>
               <div><span>Late {c.lateCount} times, {c.lateMins} min beyond grace</span><span>{c.lateDed ? "− " + rs(c.lateDed) : "Rs 0"}</span></div>
               <div><span>Approved overtime: {c.otHours} hrs</span><span>{c.otPay ? "+ " + rs(c.otPay) : "Rs 0"}</span></div>
-              <div className="pay"><span>Net payable</span><span>{rs(c.payable)}</span></div>
+              <div className="pay"><span>Earned so far ({c.inProgress ? "completed days up to now" : "whole month"})</span><span>{rs(c.earned)}</span></div>
+              <div className="pay" style={{ borderTop: 0, marginTop: 0 }}><span>Net payable{c.inProgress ? " for the whole month, if every remaining day is worked" : ""}</span><span>{rs(c.payable)}</span></div>
             </div></td></tr>,
           ])}
-            <tr className="total"><td colSpan={6}>Total Payable</td><td className="r">{rs(total)}</td></tr></tbody></table>
+            <tr className="total"><td colSpan={6}>Total</td><td className="r">{rs(rows.reduce((t, r) => t + r.c.earned, 0))}</td><td className="r">{rs(total)}</td></tr></tbody></table>
       </div>
     </>
   );
@@ -583,6 +585,24 @@ function TrackingStart({ db, act }) {
   );
 }
 
+function EarlyRules({ db, act }) {
+  const r = db.rules || { earlyGrace: 15, halfPct: 50 };
+  const [g, setG] = useState(r.earlyGrace); const [h, setH] = useState(r.halfPct); const [err, setErr] = useState("");
+  return (
+    <div className="panel">
+      <h2>Early Leave Rules</h2>
+      <p>When an employee checks out before the shift ends, by more than the early leave grace period, the day counts as a <b>half day</b> if they worked at least the half-day share of their daily hours, or as an <b>absence</b> if they worked less. Half days and absences are covered by paid leaves first; anything beyond is deducted.</p>
+      <p className="muted" style={{ fontSize: 13 }}>Example with 10 daily hours, 15 minutes grace and a 50% half-day share: leaving 10 minutes early is a full day; working 6 hours is a half day; working 1 hour (for example 4 PM to 5 PM) counts as an absence.</p>
+      <div className="row">
+        <div className="field" style={{ width: 220 }}><label>Early leave grace (minutes)</label><input type="number" min={0} max={240} value={g} onChange={e => setG(e.target.value)} /></div>
+        <div className="field" style={{ width: 260 }}><label>Half day needs at least (% of daily hours)</label><input type="number" min={10} max={90} value={h} onChange={e => setH(e.target.value)} /></div>
+        <button className="btn primary" onClick={() => act("/api/settings/rules", { earlyGrace: Number(g), halfPct: Number(h) }, setErr)}>Save Rules</button>
+      </div>
+      {err && <div className="err">{err}</div>}
+    </div>
+  );
+}
+
 function Access({ db, act }) {
   const [form, setForm] = useState({ name: "", username: "", role: "Admin", password: "" }); const [err, setErr] = useState("");
   const modes = [["both", "Biometric and PIN", "Both are required for every check-in. Recommended."],
@@ -596,6 +616,7 @@ function Access({ db, act }) {
     <>
       <h1>Admins & Security</h1>
       <TrackingStart db={db} act={act} />
+      <EarlyRules db={db} act={act} />
       <div className="panel">
         <h2>Check-In Verification</h2>
         <p className="muted">Fingerprint and face unlock work in the Haazir Android app. If a phone has no fingerprint or face unlock set up, the PIN is used instead. In a phone browser, such as Safari on iPhone, the PIN is used until Haazir is online with a secure address.</p>
@@ -647,6 +668,7 @@ const NOTE_TYPES = [
   ["late", "Late Arrival", "When an employee arrives after the grace period.", " amber"],
   ["absent", "Not Checked In", "When an employee has not checked in by shift start plus grace period.", " red"],
   ["overleave", "Beyond Allowed Leaves", "When an absent employee has already used all paid leaves for the month.", " red"],
+  ["early", "Left Early", "When an employee checks out before the shift ends, beyond the early leave grace period.", " amber"],
   ["pinreset", "PIN Reset Request", "When an employee forgets their PIN and asks for a new one.", " amber"],
 ];
 const noteLabel = t => (NOTE_TYPES.find(n => n[0] === t) || [t, t])[1];
@@ -729,7 +751,7 @@ function NotifySettings({ db, act, notif }) {
         <h2 id="nstitle">Notification Settings</h2>
         <p className="muted">Choose which pop-ups you receive. These settings apply to your account only.</p>
         {NOTE_TYPES.map(([k, t, d]) => <label key={k} className="switchrow"><span><b>{t}</b><small>{d}</small></span>
-          <input type="checkbox" className="switch" checked={p[k] !== false && (p[k] !== undefined || k === "pinreset")} onChange={() => setP({ ...p, [k]: !(p[k] !== false && (p[k] !== undefined || k === "pinreset")) })} /></label>)}
+          <input type="checkbox" className="switch" checked={p[k] !== false && (p[k] !== undefined || k === "pinreset" || k === "early")} onChange={() => setP({ ...p, [k]: !(p[k] !== false && (p[k] !== undefined || k === "pinreset" || k === "early")) })} /></label>)}
         <label className="switchrow"><span><b>Notification Tone</b><small>Play a short tone when a new notification arrives.</small></span>
           <input type="checkbox" className="switch" checked={p.sound !== false} onChange={() => setP({ ...p, sound: p.sound === false })} /></label>
         <label className="switchrow"><span><b>Device Notifications</b><small>Also show notifications on this device while Haazir is open in the background.</small></span>
@@ -923,7 +945,7 @@ function AdminApp() {
     try {
       const data = await api("/api/state");
       const first = data.employees.map(e => e.joined).sort()[0];
-      setClock(data.today, first, data.trackingStart);
+      setClock(data.today, first, data.trackingStart); setRules(data.rules);
       setDb(data); setPhase("ready");
     } catch (e) {
       if (e.status === 401) {

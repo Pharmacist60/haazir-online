@@ -5,7 +5,7 @@ import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
 import * as L from './logic.js';
 
-export const VERSION = '1.6.0';
+export const VERSION = '1.7.1';
 
 /* ---------------- database layout ---------------- */
 // Every table, with its columns. Used to create the database, and to back up and restore it.
@@ -23,7 +23,7 @@ const TABLES = {
   events: ['id', 'at_ms', 'at', 'type', 'emp_id', 'text', 'uniq'],
 };
 const SERIAL_TABLES = ['attendance', 'late_requests', 'networks', 'audit', 'events'];
-const DEFAULT_NOTIFY = '{"checkin":true,"checkout":true,"late":true,"absent":true,"overleave":true,"pinreset":true,"device":false,"sound":true}';
+const DEFAULT_NOTIFY = '{"checkin":true,"checkout":true,"late":true,"absent":true,"overleave":true,"early":true,"pinreset":true,"device":false,"sound":true}';
 
 function schema(dialect) {
   const pg = dialect === 'pg';
@@ -177,8 +177,12 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     return d;
   }
 
+  async function rules() {
+    return { earlyGrace: Number(await getSetting('early_grace', '15')), halfPct: Number(await getSetting('half_pct', '50')) };
+  }
+
   /* ----- notifications ----- */
-  const EVENT_TYPES = ['checkin', 'checkout', 'late', 'absent', 'overleave', 'pinreset'];
+  const EVENT_TYPES = ['checkin', 'checkout', 'late', 'absent', 'overleave', 'early', 'pinreset'];
   async function addEvent(type, empId, text, uniq = null) {
     if (uniq && await one('SELECT 1 AS x FROM events WHERE uniq = ?', uniq)) return;
     try { await run('INSERT INTO events (at_ms, at, type, emp_id, text, uniq) VALUES (?, ?, ?, ?, ?, ?)', Date.now(), L.stamp(), type, empId, text, uniq); }
@@ -348,7 +352,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
       admins: sup ? await all('SELECT username, name, role FROM admins ORDER BY role DESC, name') : [],
       audit: sup ? await all('SELECT at, by_user AS by, what FROM audit ORDER BY id DESC LIMIT 500') : [],
       cron: sup ? await getSetting('cron', '') : '',
-      trackingStart,
+      trackingStart, rules: await rules(),
     };
   });
 
@@ -519,6 +523,15 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     await audit(adminLabel(a), `Set the attendance tracking start date to ${L.longDate(b.date)}`);
     return { ok: true };
   });
+  route('POST', '/api/settings/rules', async ({ req, body: b }) => {
+    const a = await requireAdmin(req, true);
+    const g = Number(b.earlyGrace), h = Number(b.halfPct);
+    need(Number.isFinite(g) && g >= 0 && g <= 240, 'The early leave grace must be between 0 and 240 minutes.');
+    need(Number.isFinite(h) && h >= 10 && h <= 90, 'The half-day share must be between 10% and 90%.');
+    await setSetting('early_grace', Math.round(g)); await setSetting('half_pct', Math.round(h));
+    await audit(adminLabel(a), `Set early leave rules: ${Math.round(g)} min grace; half day needs ${Math.round(h)}% of daily hours`);
+    return { ok: true };
+  });
   route('POST', '/api/settings/mode', async ({ req, body: b }) => {
     const a = await requireAdmin(req, true);
     need(['both', 'either'].includes(b.mode), 'Choose a verification mode.');
@@ -581,7 +594,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   });
   route('POST', '/api/notify/prefs', async ({ req, body: b }) => {
     const a = await requireAdmin(req);
-    const prefs = Object.fromEntries([...EVENT_TYPES, 'device', 'sound'].map(k => [k, b[k] === undefined ? k === 'pinreset' : !!b[k]]));
+    const prefs = Object.fromEntries([...EVENT_TYPES, 'device', 'sound'].map(k => [k, b[k] === undefined ? (k === 'pinreset' || k === 'early') : !!b[k]]));
     await run('UPDATE admins SET notify = ? WHERE username = ?', JSON.stringify(prefs), a.username);
     return { ok: true };
   });
@@ -702,6 +715,13 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     need(!rec.out, 'Your shift is already complete.', 409);
     await run('UPDATE attendance SET out_time = ? WHERE id = ?', t, rec.id);
     await addEvent('checkout', emp.id, `${emp.name} checked out at ${L.fmt(t)}.`);
+    const so = L.settingsOn(emp, rec.date), rl = await rules();
+    const early = (L.toMin(so.end) + (L.overnight(so) ? 1440 : 0)) - L.rel(t, so);
+    if (early > rl.earlyGrace) {
+      const worked = L.rel(t, so) - L.rel(rec.in, so);
+      const earlyText = early >= 60 ? `${Math.floor(early / 60)} hr ${early % 60} min` : `${early} min`;
+      await addEvent('early', emp.id, `${emp.name} left ${earlyText} early (shift ends ${L.fmt(so.end)}). This counts as ${worked >= so.hours * 60 * rl.halfPct / 100 ? 'a half day' : 'an absence'}.`);
+    }
     return { action: 'out', time: t };
   });
 

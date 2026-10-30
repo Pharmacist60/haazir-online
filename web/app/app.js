@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.6.0";
+const APP_VERSION = "1.7.1";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -210,6 +210,7 @@ table.t{width:100%;border-collapse:collapse;font-size:14px}
 .bell{position:relative;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:#fff;display:grid;place-items:center;color:var(--ink)}
 .bell .dot{position:absolute;top:-4px;right:-4px;min-width:20px;height:20px;padding:0 5px;border-radius:99px;background:#C62828;color:#fff;font-size:11px;font-weight:700;display:grid;place-items:center;border:2px solid #fff}
 .menu.notes{width:360px;max-width:92vw;max-height:70vh;overflow:auto}
+@media(max-width:760px){.menu.notes{position:fixed;left:8px;right:8px;top:62px;width:auto;max-width:none;max-height:75vh}.menu{max-width:calc(100vw - 16px)}.popups{left:10px;right:10px;bottom:10px;width:auto;max-width:none}.topright{gap:8px}}
 .noteshead{display:flex;justify-content:space-between;align-items:center;padding:6px 8px 10px}
 .note{padding:10px 12px;border-radius:8px;font-size:14px;display:flex;flex-direction:column;gap:4px;align-items:flex-start}
 .note.unread{background:#F1F3FA}
@@ -321,11 +322,27 @@ function monthsList() {
     return out.reverse();
 }
 /* ---------- salary calculation ---------- */
+// Early leave rules (set by the super admin under Admins & Security).
+let RULES = { earlyGrace: 15, halfPct: 50 };
+function setRules(r) { if (r)
+    RULES = { ...RULES, ...r }; }
+// How a completed day counts: full day, half day (left early but worked at least the half-day share), or short day (counts as an absence).
+function dayKind(rec, s) {
+    if (!rec || !rec.out)
+        return { kind: "full", early: 0, worked: null };
+    const endAbs = toMin(s.end) + (overnight(s) ? 1440 : 0);
+    const early = Math.max(0, endAbs - rel(rec.out, s));
+    const worked = rel(rec.out, s) - rel(rec.in, s);
+    if (early <= RULES.earlyGrace)
+        return { kind: "full", early, worked };
+    return { kind: worked >= s.hours * 60 * RULES.halfPct / 100 ? "half" : "short", early, worked };
+}
 function calcSalary(e, ym, attendance, overtime) {
     const [y, m] = ym.split("-").map(Number);
     const dim = daysIn(y, m);
-    let base = 0, lateDed = 0, lateCount = 0, lateMins = 0, otPay = 0, otHours = 0, present = 0, untracked = 0;
-    const absences = [];
+    let base = 0, earnedBase = 0, lateDed = 0, lateCount = 0, lateMins = 0, otPay = 0, otHours = 0, present = 0, untracked = 0, halfDays = 0, shortDays = 0;
+    const missed = []; // days counted as absence: { ds, dp, units } (1 = full day, 0.5 = half day)
+    let absentDays = 0;
     const lastS = settingsOn(e, `${ym}-${pad(dim)}`);
     for (let d = 1; d <= dim; d++) {
         const ds = `${ym}-${pad(d)}`;
@@ -336,18 +353,34 @@ function calcSalary(e, ym, attendance, overtime) {
             continue;
         const dp = s.salary / dim;
         base += dp;
-        if (ds >= TODAY || s.off.includes(weekday(ds)))
-            continue;
         const rec = attendance.find(a => a.synced && a.empId === e.id && a.date === ds);
+        // "Earned so far" counts every day up to yesterday, plus today once today's check-out is done.
+        if (ds < TODAY || (ds === TODAY && rec && rec.out))
+            earnedBase += dp;
+        else
+            continue;
+        if (s.off.includes(weekday(ds)))
+            continue;
         if (!rec && ds < TRACK_START) {
             untracked++;
             continue;
         }
         if (!rec) {
-            absences.push({ ds, dp });
+            missed.push({ ds, dp, units: 1 });
+            absentDays++;
             continue;
         }
         present++;
+        const k = dayKind(rec, s);
+        if (k.kind === "half") {
+            halfDays++;
+            missed.push({ ds, dp, units: 0.5 });
+        }
+        else if (k.kind === "short") {
+            shortDays++;
+            missed.push({ ds, dp, units: 1 });
+            continue;
+        }
         const lm = lateBeyond(rec, s);
         if (lm > 0) {
             lateCount++;
@@ -360,32 +393,35 @@ function calcSalary(e, ym, attendance, overtime) {
             otPay += ot.hours * (dp / s.hours) * ot.rate;
         }
     }
-    // Paid leaves are pro-rated when the employee joins or leaves during the month.
-    let empDays = 0, firstDay = null, lastDay = null;
+    // Paid leaves (pro-rated to the tracked days of the month) cover absences, half days and short days in date order.
+    let empDays = 0, firstDay = null, lastDay = null, trackedDays = 0;
     for (let d = 1; d <= dim; d++) {
         const ds = `${ym}-${pad(d)}`;
         if (employed(e, ds)) {
             empDays++;
             firstDay = firstDay || ds;
             lastDay = ds;
+            if (ds >= TRACK_START)
+                trackedDays++;
         }
     }
-    let trackedDays = 0;
-    for (let d = 1; d <= dim; d++) {
-        const ds = `${ym}-${pad(d)}`;
-        if (employed(e, ds) && ds >= TRACK_START)
-            trackedDays++;
-    }
     const leaves = lastS ? Math.round(lastS.leaves * trackedDays / dim) : 0;
-    const unpaid = absences.slice(leaves);
-    const absDed = unpaid.reduce((t, a) => t + a.dp, 0);
-    const covered = Math.min(leaves, absences.length);
+    let left = leaves, absDed = 0, covered = 0, unpaidUnits = 0;
+    for (const mday of missed) {
+        const c = Math.min(mday.units, left);
+        left -= c;
+        covered += c;
+        unpaidUnits += mday.units - c;
+        absDed += (mday.units - c) * mday.dp;
+    }
+    const usedUnits = missed.reduce((t, x) => t + x.units, 0);
     const inProgress = `${ym}-${pad(dim)}` >= TODAY;
     const daily = lastS ? lastS.salary / dim : 0;
     // Paid leaves not taken are paid extra at the daily rate, once the month is complete.
-    const unusedLeaves = Math.max(0, leaves - absences.length);
+    const unusedLeaves = Math.max(0, leaves - usedUnits);
     const leavePay = inProgress ? 0 : unusedLeaves * daily;
-    return { base, present, absences: absences.length, leaves, covered, unpaid: unpaid.length, absDed, unusedLeaves, leavePay, lateCount, lateMins, lateDed, otHours, otPay, payable: base - absDed - lateDed + otPay + leavePay, inProgress, daily, empDays, dim, firstDay, lastDay, untracked };
+    const earned = earnedBase - absDed - lateDed + otPay + leavePay;
+    return { base, earnedBase, earned, present, absences: absentDays, halfDays, shortDays, usedUnits, leaves, covered, unpaid: unpaidUnits, absDed, unusedLeaves, leavePay, lateCount, lateMins, lateDed, otHours, otPay, payable: base - absDed - lateDed + otPay + leavePay, inProgress, daily, empDays, dim, firstDay, lastDay, untracked };
 }
 function Copyright() {
     return React.createElement("div", { className: "copy" },
