@@ -168,6 +168,8 @@ table.t{width:100%;border-collapse:collapse;font-size:14px}
 .updbar span{flex:1;min-width:200px}
 .relnotes{white-space:pre-wrap;background:var(--paper);border-radius:10px;padding:12px 14px;font-size:14px;max-height:320px;overflow:auto}
 .pa a.btn{text-decoration:none}
+.pa textarea{font:inherit;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px;width:100%;resize:vertical}
+.remark{margin-top:4px;font-size:12px;color:#7A4E05;background:#FCF1DC;border-radius:6px;padding:2px 8px;max-width:260px;white-space:normal}
 .linkish{border:0;background:none;color:var(--green-d);font-weight:700;font-size:14px;padding:6px;text-decoration:underline;cursor:pointer}
 .printhead{display:none}
 @media print{.pa{background:#fff}.side,.topbar,.updbar,.popups,.noprint,.toast,.pa button,.pa select,.seg2{display:none!important}.admin{display:block}.main{padding:0;max-width:none}.panel{border:0;padding:0;overflow:visible}.printhead{display:block;margin-bottom:10px;font-size:13px;color:#575E7E}.stats{grid-template-columns:repeat(4,1fr)}}
@@ -215,7 +217,9 @@ const addDays = (ds, n) => { const d = new Date(ds + "T00:00:00"); d.setDate(d.g
 let YEST = addDays(TODAY, -1);
 let FIRST_MONTH = TODAY.slice(0, 7);
 // The server decides the date (Pakistan time); the browser follows it so every screen agrees.
-function setClock(today, firstDate) { TODAY = today; YEST = addDays(today, -1); if (firstDate) FIRST_MONTH = firstDate.slice(0, 7); }
+// Attendance is only checked from the day Haazir started being used; earlier days are paid normally.
+let TRACK_START = "0000-00-00";
+function setClock(today, firstDate, trackStart) { TODAY = today; YEST = addDays(today, -1); if (firstDate) FIRST_MONTH = firstDate.slice(0, 7); if (trackStart) TRACK_START = trackStart; }
 const longDate = ds => new Date(ds + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 // Resigned staff can still work on their last day; access ends the day after.
 const isGone = e => !!e.left && e.left < TODAY;
@@ -242,7 +246,7 @@ function monthsList() {
 /* ---------- salary calculation ---------- */
 function calcSalary(e, ym, attendance, overtime) {
   const [y, m] = ym.split("-").map(Number); const dim = daysIn(y, m);
-  let base = 0, lateDed = 0, lateCount = 0, lateMins = 0, otPay = 0, otHours = 0, present = 0;
+  let base = 0, lateDed = 0, lateCount = 0, lateMins = 0, otPay = 0, otHours = 0, present = 0, untracked = 0;
   const absences = [];
   const lastS = settingsOn(e, `${ym}-${pad(dim)}`);
   for (let d = 1; d <= dim; d++) {
@@ -252,6 +256,7 @@ function calcSalary(e, ym, attendance, overtime) {
     const dp = s.salary / dim; base += dp;
     if (ds >= TODAY || s.off.includes(weekday(ds))) continue;
     const rec = attendance.find(a => a.synced && a.empId === e.id && a.date === ds);
+    if (!rec && ds < TRACK_START) { untracked++; continue; }
     if (!rec) { absences.push({ ds, dp }); continue; }
     present++;
     const lm = lateBeyond(rec, s);
@@ -260,8 +265,10 @@ function calcSalary(e, ym, attendance, overtime) {
     if (ot) { otHours += ot.hours; otPay += ot.hours * (dp / s.hours) * ot.rate; }
   }
   // Paid leaves are pro-rated when the employee joins or leaves during the month.
-  let empDays = 0; for (let d = 1; d <= dim; d++) if (employed(e, `${ym}-${pad(d)}`)) empDays++;
-  const leaves = lastS ? Math.round(lastS.leaves * empDays / dim) : 0;
+  let empDays = 0, firstDay = null, lastDay = null;
+  for (let d = 1; d <= dim; d++) { const ds = `${ym}-${pad(d)}`; if (employed(e, ds)) { empDays++; firstDay = firstDay || ds; lastDay = ds; } }
+  let trackedDays = 0; for (let d = 1; d <= dim; d++) { const ds = `${ym}-${pad(d)}`; if (employed(e, ds) && ds >= TRACK_START) trackedDays++; }
+  const leaves = lastS ? Math.round(lastS.leaves * trackedDays / dim) : 0;
   const unpaid = absences.slice(leaves);
   const absDed = unpaid.reduce((t, a) => t + a.dp, 0);
   const covered = Math.min(leaves, absences.length);
@@ -270,7 +277,7 @@ function calcSalary(e, ym, attendance, overtime) {
   // Paid leaves not taken are paid extra at the daily rate, once the month is complete.
   const unusedLeaves = Math.max(0, leaves - absences.length);
   const leavePay = inProgress ? 0 : unusedLeaves * daily;
-  return { base, present, absences: absences.length, leaves, covered, unpaid: unpaid.length, absDed, unusedLeaves, leavePay, lateCount, lateMins, lateDed, otHours, otPay, payable: base - absDed - lateDed + otPay + leavePay, inProgress, daily };
+  return { base, present, absences: absences.length, leaves, covered, unpaid: unpaid.length, absDed, unusedLeaves, leavePay, lateCount, lateMins, lateDed, otHours, otPay, payable: base - absDed - lateDed + otPay + leavePay, inProgress, daily, empDays, dim, firstDay, lastDay, untracked };
 }
 
 function Copyright() {

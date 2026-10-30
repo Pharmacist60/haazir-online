@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.6.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -233,6 +233,8 @@ table.t{width:100%;border-collapse:collapse;font-size:14px}
 .updbar span{flex:1;min-width:200px}
 .relnotes{white-space:pre-wrap;background:var(--paper);border-radius:10px;padding:12px 14px;font-size:14px;max-height:320px;overflow:auto}
 .pa a.btn{text-decoration:none}
+.pa textarea{font:inherit;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px;width:100%;resize:vertical}
+.remark{margin-top:4px;font-size:12px;color:#7A4E05;background:#FCF1DC;border-radius:6px;padding:2px 8px;max-width:260px;white-space:normal}
 .linkish{border:0;background:none;color:var(--green-d);font-weight:700;font-size:14px;padding:6px;text-decoration:underline;cursor:pointer}
 .printhead{display:none}
 @media print{.pa{background:#fff}.side,.topbar,.updbar,.popups,.noprint,.toast,.pa button,.pa select,.seg2{display:none!important}.admin{display:block}.main{padding:0;max-width:none}.panel{border:0;padding:0;overflow:visible}.printhead{display:block;margin-bottom:10px;font-size:13px;color:#575E7E}.stats{grid-template-columns:repeat(4,1fr)}}
@@ -279,8 +281,11 @@ const addDays = (ds, n) => { const d = new Date(ds + "T00:00:00"); d.setDate(d.g
 let YEST = addDays(TODAY, -1);
 let FIRST_MONTH = TODAY.slice(0, 7);
 // The server decides the date (Pakistan time); the browser follows it so every screen agrees.
-function setClock(today, firstDate) { TODAY = today; YEST = addDays(today, -1); if (firstDate)
-    FIRST_MONTH = firstDate.slice(0, 7); }
+// Attendance is only checked from the day Haazir started being used; earlier days are paid normally.
+let TRACK_START = "0000-00-00";
+function setClock(today, firstDate, trackStart) { TODAY = today; YEST = addDays(today, -1); if (firstDate)
+    FIRST_MONTH = firstDate.slice(0, 7); if (trackStart)
+    TRACK_START = trackStart; }
 const longDate = ds => new Date(ds + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 // Resigned staff can still work on their last day; access ends the day after.
 const isGone = e => !!e.left && e.left < TODAY;
@@ -319,7 +324,7 @@ function monthsList() {
 function calcSalary(e, ym, attendance, overtime) {
     const [y, m] = ym.split("-").map(Number);
     const dim = daysIn(y, m);
-    let base = 0, lateDed = 0, lateCount = 0, lateMins = 0, otPay = 0, otHours = 0, present = 0;
+    let base = 0, lateDed = 0, lateCount = 0, lateMins = 0, otPay = 0, otHours = 0, present = 0, untracked = 0;
     const absences = [];
     const lastS = settingsOn(e, `${ym}-${pad(dim)}`);
     for (let d = 1; d <= dim; d++) {
@@ -334,6 +339,10 @@ function calcSalary(e, ym, attendance, overtime) {
         if (ds >= TODAY || s.off.includes(weekday(ds)))
             continue;
         const rec = attendance.find(a => a.synced && a.empId === e.id && a.date === ds);
+        if (!rec && ds < TRACK_START) {
+            untracked++;
+            continue;
+        }
         if (!rec) {
             absences.push({ ds, dp });
             continue;
@@ -352,11 +361,22 @@ function calcSalary(e, ym, attendance, overtime) {
         }
     }
     // Paid leaves are pro-rated when the employee joins or leaves during the month.
-    let empDays = 0;
-    for (let d = 1; d <= dim; d++)
-        if (employed(e, `${ym}-${pad(d)}`))
+    let empDays = 0, firstDay = null, lastDay = null;
+    for (let d = 1; d <= dim; d++) {
+        const ds = `${ym}-${pad(d)}`;
+        if (employed(e, ds)) {
             empDays++;
-    const leaves = lastS ? Math.round(lastS.leaves * empDays / dim) : 0;
+            firstDay = firstDay || ds;
+            lastDay = ds;
+        }
+    }
+    let trackedDays = 0;
+    for (let d = 1; d <= dim; d++) {
+        const ds = `${ym}-${pad(d)}`;
+        if (employed(e, ds) && ds >= TRACK_START)
+            trackedDays++;
+    }
+    const leaves = lastS ? Math.round(lastS.leaves * trackedDays / dim) : 0;
     const unpaid = absences.slice(leaves);
     const absDed = unpaid.reduce((t, a) => t + a.dp, 0);
     const covered = Math.min(leaves, absences.length);
@@ -365,7 +385,7 @@ function calcSalary(e, ym, attendance, overtime) {
     // Paid leaves not taken are paid extra at the daily rate, once the month is complete.
     const unusedLeaves = Math.max(0, leaves - absences.length);
     const leavePay = inProgress ? 0 : unusedLeaves * daily;
-    return { base, present, absences: absences.length, leaves, covered, unpaid: unpaid.length, absDed, unusedLeaves, leavePay, lateCount, lateMins, lateDed, otHours, otPay, payable: base - absDed - lateDed + otPay + leavePay, inProgress, daily };
+    return { base, present, absences: absences.length, leaves, covered, unpaid: unpaid.length, absDed, unusedLeaves, leavePay, lateCount, lateMins, lateDed, otHours, otPay, payable: base - absDed - lateDed + otPay + leavePay, inProgress, daily, empDays, dim, firstDay, lastDay, untracked };
 }
 function Copyright() {
     return React.createElement("div", { className: "copy" },
@@ -754,7 +774,7 @@ function workHours(e, ym, attendance, overtime) {
         const ds = `${ym}-${pad(d)}`;
         if (ds > TODAY)
             break;
-        if (!employed(e, ds))
+        if (!employed(e, ds) || ds < TRACK_START)
             continue;
         const s = settingsOn(e, ds);
         if (!s)
@@ -1036,7 +1056,8 @@ function Today({ db, act, superAdmin }) {
                     return React.createElement("tr", { key: e.id },
                         React.createElement("td", null,
                             React.createElement("b", null, e.name),
-                            React.createElement("div", { className: "muted" }, e.id)),
+                            React.createElement("div", { className: "muted" }, e.id),
+                            e.notes && React.createElement("div", { className: "remark" }, e.notes)),
                         React.createElement("td", { className: "nw" }, s ? React.createElement(React.Fragment, null,
                             fmt(s.start),
                             " \u2013 ",
@@ -1063,6 +1084,15 @@ function RecordsInner({ db, act }) {
         if (employed(e, ds))
             days.push(ds);
     }
+    const remove = async (ds) => {
+        const reason = prompt(`Delete ${e.name}'s attendance for ${niceDate(ds)}?\n\nThe day will count as an absence. Enter the reason for the audit log:`);
+        if (reason === null)
+            return;
+        if (!reason.trim())
+            return setErr("A reason is required to delete an entry.");
+        if (await act("/api/attendance/delete", { empId: e.id, date: ds, reason }, setErr))
+            setErr("");
+    };
     const save = async () => {
         if (!edit.in)
             return setErr("Please enter a check-in time.");
@@ -1076,7 +1106,7 @@ function RecordsInner({ db, act }) {
     };
     return (React.createElement(React.Fragment, null,
         React.createElement("h1", null, "Attendance Records"),
-        React.createElement("p", { className: "sub" }, "Add missing entries or correct errors. Every change is recorded in the audit log. Night shifts appear under the date they began."),
+        React.createElement("p", { className: "sub" }, "Add missing entries, edit wrong times, or delete entries made by mistake. Every change is recorded in the audit log with its reason. Night shifts appear under the date they began."),
         React.createElement("div", { className: "panel" },
             React.createElement("div", { className: "row", style: { marginBottom: 12 } },
                 React.createElement("select", { value: empId, onChange: ev => { setEmpId(ev.target.value); setEdit(null); }, style: { width: "auto" } }, db.employees.map(x => React.createElement("option", { key: x.id, value: x.id },
@@ -1114,7 +1144,7 @@ function RecordsInner({ db, act }) {
                                     React.createElement("button", { className: "btn small primary", onClick: save }, "Save"),
                                     React.createElement("button", { className: "btn small", onClick: () => { setEdit(null); setErr(""); } }, "Cancel")))));
                     const lm = rec ? lateBeyond(rec, s) : 0;
-                    const st = off ? React.createElement("span", { className: "tag grey" }, "Day Off") : !rec ? (ds === TODAY ? React.createElement("span", { className: "tag grey" }, "Today") : React.createElement("span", { className: "tag red" }, "Absent")) : !rec.out && ds < YEST ? React.createElement("span", { className: "tag red" }, "No Check-Out") : lm > 0 ? React.createElement("span", { className: "tag amber" },
+                    const st = off ? React.createElement("span", { className: "tag grey" }, "Day Off") : !rec && ds < TRACK_START ? React.createElement("span", { className: "tag grey" }, "Before Tracking") : !rec ? (ds === TODAY ? React.createElement("span", { className: "tag grey" }, "Today") : React.createElement("span", { className: "tag red" }, "Absent")) : !rec.out && ds < YEST ? React.createElement("span", { className: "tag red" }, "No Check-Out") : lm > 0 ? React.createElement("span", { className: "tag amber" },
                         "Late by ",
                         minText(lm)) : React.createElement("span", { className: "tag" }, "On Time");
                     return React.createElement("tr", { key: ds },
@@ -1124,16 +1154,18 @@ function RecordsInner({ db, act }) {
                         React.createElement("td", null, rec?.method || "—"),
                         React.createElement("td", null, st),
                         React.createElement("td", null,
-                            React.createElement("button", { className: "btn small", onClick: () => { setErr(""); setEdit({ date: ds, in: rec?.in || s.start, out: rec?.out || "", reason: "" }); } }, rec ? "Correct" : "Add Entry")));
+                            React.createElement("div", { className: "row", style: { justifyContent: "flex-end", flexWrap: "nowrap" } },
+                                React.createElement("button", { className: "btn small", onClick: () => { setErr(""); setEdit({ date: ds, in: rec?.in || s.start, out: rec?.out || "", reason: "" }); } }, rec ? "Edit" : "Add Entry"),
+                                rec && React.createElement("button", { className: "btn small danger", onClick: () => remove(ds) }, "Delete"))));
                 }))))));
 }
-const blankForm = () => ({ name: "", role: "", pin: "", joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthMode: "auto", monthHours: "", off: [], leaves: 4, grace: 10, from: TODAY });
+const blankForm = () => ({ name: "", role: "", pin: "", notes: "", joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthMode: "auto", monthHours: "", off: [], leaves: 4, grace: 10, from: TODAY });
 const monthText = v => v === -1 ? "Automatic" : v ? `${v} hrs/month` : "No limit";
 function Employees({ db, act }) {
     const [form, setForm] = useState(null);
     const [err, setErr] = useState("");
     const f = (k, v) => setForm({ ...form, [k]: v });
-    const openEdit = e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; setErr(""); setForm({ editId: e.id, name: e.name, role: e.role, pin: "", joined: e.joined, left: e.left || "", ...s, monthMode: s.monthHours === -1 ? "auto" : s.monthHours ? "fixed" : "none", monthHours: s.monthHours > 0 ? s.monthHours : "", monthHours: s.monthHours ?? "", off: [...s.off], from: TODAY }); };
+    const openEdit = e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; setErr(""); setForm({ editId: e.id, name: e.name, role: e.role, pin: "", joined: e.joined, left: e.left || "", notes: e.notes || "", ...s, monthMode: s.monthHours === -1 ? "auto" : s.monthHours ? "fixed" : "none", monthHours: s.monthHours > 0 ? s.monthHours : "", monthHours: s.monthHours ?? "", off: [...s.off], from: TODAY }); };
     const save = async () => {
         const n = ["salary", "hours", "leaves", "grace"];
         const vals = Object.fromEntries(n.map(k => [k, Number(form[k])]));
@@ -1207,6 +1239,9 @@ function Employees({ db, act }) {
                 form.editId && React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Effective from"),
                     React.createElement("input", { type: "date", value: form.from, onChange: e => f("from", e.target.value) }))),
+            React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                React.createElement("label", null, "Remarks (for admins only; not used in any calculation)"),
+                React.createElement("textarea", { rows: 2, maxLength: 500, value: form.notes, placeholder: "e.g. Usual day off: Sunday. Prefers evening shifts.", onChange: e => f("notes", e.target.value) })),
             form.monthMode === "auto" && React.createElement("p", { className: "muted", style: { margin: "0 0 12px", fontSize: 13 } }, "Automatic allowed hours = daily working hours \u00D7 (days in the month \u2212 weekly days off). For example, 10 hours a day with no weekly day off gives 280 hours in a 28-day month, 300 in a 30-day month and 310 in a 31-day month. Paid leaves not taken are paid extra in Payroll."),
             form.start && form.end && overnight(form) && React.createElement("div", { className: "notice", style: { marginBottom: 12 } }, "Night shift: ends the following morning. Attendance is recorded under the shift's start date, and the weekly day off refers to the night the shift would begin."),
             React.createElement("span", { className: "lbl" }, "Weekly day off"),
@@ -1226,9 +1261,11 @@ function Employees({ db, act }) {
                             React.createElement("th", null, "Hours/Day"),
                             React.createElement("th", null, "Hours/Month"),
                             React.createElement("th", null, "Paid Leaves"),
-                            React.createElement("th", null, "Grace"))),
+                            React.createElement("th", null, "Grace"),
+                            React.createElement("th", null, "Day Off"),
+                            React.createElement("th", null, "Changed By"))),
                     React.createElement("tbody", null, editing.history.slice().reverse().map(h => React.createElement("tr", { key: h.from },
-                        React.createElement("td", null, niceDate(h.from)),
+                        React.createElement("td", { className: "nw" }, longDate(h.from)),
                         React.createElement("td", null, rs(h.salary)),
                         React.createElement("td", null, shiftText(h)),
                         React.createElement("td", null, h.hours),
@@ -1236,7 +1273,12 @@ function Employees({ db, act }) {
                         React.createElement("td", null, h.leaves),
                         React.createElement("td", null,
                             h.grace,
-                            " min")))))))) : React.createElement("div", { style: { marginBottom: 18 } },
+                            " min"),
+                        React.createElement("td", null, h.off.map(i => DAYS[i]).join(", ") || "None"),
+                        React.createElement("td", { className: "nw" }, h.changedBy ? React.createElement(React.Fragment, null,
+                            h.changedBy,
+                            React.createElement("div", { className: "muted" }, h.changedAt)) : React.createElement("span", { className: "muted" }, "Before records")))))),
+                React.createElement("p", { className: "muted", style: { fontSize: 13, marginTop: 8 } }, "Each row applies from its date until the next row. A pay raise or new duty hours appear here as a new row; earlier months keep the old figures.")))) : React.createElement("div", { style: { marginBottom: 18 } },
             React.createElement("button", { className: "btn primary", onClick: () => { setErr(""); setForm(blankForm()); } }, "Add Employee")),
         React.createElement("div", { className: "panel" },
             React.createElement("table", { className: "t" },
@@ -1257,7 +1299,8 @@ function Employees({ db, act }) {
                         React.createElement("td", null,
                             React.createElement("b", null, e.name),
                             React.createElement("div", { className: "muted" }, e.role),
-                            React.createElement("div", { className: "muted" }, e.id)),
+                            React.createElement("div", { className: "muted" }, e.id),
+                            e.notes && React.createElement("div", { className: "remark" }, e.notes)),
                         React.createElement("td", { className: "nw" },
                             "Joined ",
                             longDate(e.joined),
@@ -1452,7 +1495,7 @@ function Salary({ db }) {
     const inProgress = rows[0]?.c.inProgress;
     return (React.createElement(React.Fragment, null,
         React.createElement("h1", null, "Payroll"),
-        React.createElement("p", { className: "sub" }, "Daily rate is the monthly salary divided by the days in the month. Absences beyond the paid leaves and late minutes beyond the grace period are deducted. Paid leaves not taken are paid extra at the daily rate when the month ends, and approved overtime is added. Select an employee to view the full calculation."),
+        React.createElement("p", { className: "sub" }, "Daily rate is the monthly salary divided by the days in the month. For the current month, Net Payable assumes the remaining days are worked. Absences beyond the paid leaves and late minutes beyond the grace period are deducted. Paid leaves not taken are paid extra at the daily rate when the month ends, and approved overtime is added. Select an employee to view the full calculation."),
         React.createElement("div", { className: "printhead" },
             "Haazir, eco Pharmacy: Payroll for ",
             monthName(month),
@@ -1462,7 +1505,7 @@ function Salary({ db }) {
             "."),
         React.createElement("div", { className: "row", style: { marginBottom: 14, alignItems: "center" } },
             React.createElement(MonthPick, { value: month, onChange: v => { setMonth(v); setOpen(null); } }),
-            inProgress && React.createElement("span", { className: "tag amber" }, "In Progress: Calculated to Yesterday"),
+            inProgress && React.createElement("span", { className: "tag amber" }, "In Progress: Deductions to Yesterday"),
             React.createElement(ExportButtons, { onExcel: () => saveBlob(makeXlsx("Payroll " + month, [
                     ["Employee ID", "Name", "Month", "Salary for Month", "Daily Rate", "Days Present", "Absences", "Covered by Paid Leave", "Unpaid Absences", "Absence Deduction", "Times Late", "Minutes Late (beyond grace)", "Late Deduction", "Unused Paid Leaves", "Unused Leave Pay", "Approved Overtime (hrs)", "Overtime Pay", "Net Payable"],
                     ...rows.map(({ e, c }) => [e.id, e.name, monthName(month), r2(c.base), r2(c.daily), c.present, c.absences, c.covered, c.unpaid, r2(c.absDed), c.lateCount, c.lateMins, r2(c.lateDed), c.inProgress ? "At month end" : c.unusedLeaves, r2(c.leavePay), c.otHours, r2(c.otPay), r2(c.payable)]),
@@ -1498,12 +1541,20 @@ function Salary({ db }) {
                                     React.createElement("div", null,
                                         React.createElement("span", null,
                                             "Salary for ",
-                                            monthName(month),
-                                            e.history.length > 1 || e.joined.startsWith(month) || e.left?.startsWith(month) ? " (adjusted for changes, joining or resign date)" : ""),
+                                            c.empDays === c.dim ? `all of ${monthName(month)}` : `${c.empDays} of ${c.dim} days in ${monthName(month)} (${niceDate(c.firstDay)} to ${niceDate(c.lastDay)})`,
+                                            c.inProgress ? ", if every remaining day is worked" : ""),
                                         React.createElement("span", null, rs(c.base))),
                                     React.createElement("div", null,
                                         React.createElement("span", null, "Daily rate"),
                                         React.createElement("span", null, rs(c.daily))),
+                                    c.untracked > 0 && React.createElement("div", null,
+                                        React.createElement("span", null,
+                                            "Paid in full before attendance tracking started (",
+                                            longDate(TRACK_START),
+                                            "): ",
+                                            c.untracked,
+                                            " days"),
+                                        React.createElement("span", null, "Rs 0")),
                                     React.createElement("div", null,
                                         React.createElement("span", null, "Days present"),
                                         React.createElement("span", null, c.present)),
@@ -1591,6 +1642,19 @@ function NetworkTab({ db, act }) {
                         React.createElement("td", { className: "r" },
                             React.createElement("button", { className: "btn small danger", onClick: () => remove(n) }, "Remove")))))))));
 }
+function TrackingStart({ db, act }) {
+    const [d, setD] = useState(db.trackingStart || TODAY);
+    const [err, setErr] = useState("");
+    return (React.createElement("div", { className: "panel" },
+        React.createElement("h2", null, "Attendance Tracking Start"),
+        React.createElement("p", null, "Haazir checks attendance from this date. Working days before it are paid in full and never counted as absences, because attendance was not recorded in Haazir yet. Set it to the day your staff started checking in with Haazir."),
+        React.createElement("div", { className: "row" },
+            React.createElement("div", { className: "field", style: { width: 200 } },
+                React.createElement("label", null, "Start date"),
+                React.createElement("input", { type: "date", value: d, max: TODAY, onChange: e => setD(e.target.value) })),
+            React.createElement("button", { className: "btn primary", disabled: d === db.trackingStart, onClick: () => act("/api/settings/tracking", { date: d }, setErr) }, "Save Date")),
+        err && React.createElement("div", { className: "err" }, err)));
+}
 function Access({ db, act }) {
     const [form, setForm] = useState({ name: "", username: "", role: "Admin", password: "" });
     const [err, setErr] = useState("");
@@ -1608,6 +1672,7 @@ function Access({ db, act }) {
         act("/api/admins/reset", { username: a.username, password: pw }); };
     return (React.createElement(React.Fragment, null,
         React.createElement("h1", null, "Admins & Security"),
+        React.createElement(TrackingStart, { db: db, act: act }),
         React.createElement("div", { className: "panel" },
             React.createElement("h2", null, "Check-In Verification"),
             React.createElement("p", { className: "muted" }, "Fingerprint and face unlock work in the Haazir Android app. If a phone has no fingerprint or face unlock set up, the PIN is used instead. In a phone browser, such as Safari on iPhone, the PIN is used until Haazir is online with a secure address."),
@@ -2100,7 +2165,7 @@ function AdminApp() {
         try {
             const data = await api("/api/state");
             const first = data.employees.map(e => e.joined).sort()[0];
-            setClock(data.today, first);
+            setClock(data.today, first, data.trackingStart);
             setDb(data);
             setPhase("ready");
         }

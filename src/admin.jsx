@@ -99,7 +99,7 @@ function workHours(e, ym, attendance, overtime) {
   for (let d = 1; d <= dim; d++) {
     const ds = `${ym}-${pad(d)}`;
     if (ds > TODAY) break;
-    if (!employed(e, ds)) continue;
+    if (!employed(e, ds) || ds < TRACK_START) continue;
     const s = settingsOn(e, ds); if (!s) continue;
     const rec = attendance.find(a => a.synced && a.empId === e.id && a.date === ds);
     const off = s.off.includes(weekday(ds));
@@ -262,7 +262,7 @@ function Today({ db, act, superAdmin }) {
             else if (s.off.includes(weekday(TODAY))) st = <span className="tag grey">Day Off</span>;
             else if (!rec) st = toMin(nowTime()) > toMin(s.start) + s.grace ? <span className="tag red">Not Checked In</span> : <span className="tag grey">Shift Not Started</span>;
             else { const lm = lateBeyond(rec, s); st = rec.out ? <span className="tag">Checked Out</span> : lm > 0 ? <span className="tag amber">Late by {minText(lm)}</span> : <span className="tag">On Time</span>; }
-            return <tr key={e.id}><td><b>{e.name}</b><div className="muted">{e.id}</div></td><td className="nw">{s ? <>{fmt(s.start)} – {fmt(s.end)}{overnight(s) && <div className="muted">Night shift</div>}</> : "—"}</td><td className="nw">{rec ? timeText(rec.in, s) : "—"}</td><td className="nw">{rec ? timeText(rec.out, s) : "—"}</td><td>{rec?.method || "—"}</td><td>{st}</td></tr>;
+            return <tr key={e.id}><td><b>{e.name}</b><div className="muted">{e.id}</div>{e.notes && <div className="remark">{e.notes}</div>}</td><td className="nw">{s ? <>{fmt(s.start)} – {fmt(s.end)}{overnight(s) && <div className="muted">Night shift</div>}</> : "—"}</td><td className="nw">{rec ? timeText(rec.in, s) : "—"}</td><td className="nw">{rec ? timeText(rec.out, s) : "—"}</td><td>{rec?.method || "—"}</td><td>{st}</td></tr>;
           })}</tbody></table>
       </div>
     </>
@@ -277,6 +277,12 @@ function RecordsInner({ db, act }) {
   const [y, m] = month.split("-").map(Number);
   const days = [];
   for (let d = 1; d <= daysIn(y, m); d++) { const ds = `${month}-${pad(d)}`; if (ds > TODAY) break; if (employed(e, ds)) days.push(ds); }
+  const remove = async ds => {
+    const reason = prompt(`Delete ${e.name}'s attendance for ${niceDate(ds)}?\n\nThe day will count as an absence. Enter the reason for the audit log:`);
+    if (reason === null) return;
+    if (!reason.trim()) return setErr("A reason is required to delete an entry.");
+    if (await act("/api/attendance/delete", { empId: e.id, date: ds, reason }, setErr)) setErr("");
+  };
   const save = async () => {
     if (!edit.in) return setErr("Please enter a check-in time.");
     if (!edit.reason.trim()) return setErr("A reason is required for the audit log.");
@@ -286,7 +292,7 @@ function RecordsInner({ db, act }) {
   return (
     <>
       <h1>Attendance Records</h1>
-      <p className="sub">Add missing entries or correct errors. Every change is recorded in the audit log. Night shifts appear under the date they began.</p>
+      <p className="sub">Add missing entries, edit wrong times, or delete entries made by mistake. Every change is recorded in the audit log with its reason. Night shifts appear under the date they began.</p>
       <div className="panel">
         <div className="row" style={{ marginBottom: 12 }}>
           <select value={empId} onChange={ev => { setEmpId(ev.target.value); setEdit(null); }} style={{ width: "auto" }}>{db.employees.map(x => <option key={x.id} value={x.id}>{x.name} ({x.id}){x.left ? ", Resigned" : ""}</option>)}</select>
@@ -305,22 +311,24 @@ function RecordsInner({ db, act }) {
                 <td><div className="row"><button className="btn small primary" onClick={save}>Save</button><button className="btn small" onClick={() => { setEdit(null); setErr(""); }}>Cancel</button></div></td></tr>
             );
             const lm = rec ? lateBeyond(rec, s) : 0;
-            const st = off ? <span className="tag grey">Day Off</span> : !rec ? (ds === TODAY ? <span className="tag grey">Today</span> : <span className="tag red">Absent</span>) : !rec.out && ds < YEST ? <span className="tag red">No Check-Out</span> : lm > 0 ? <span className="tag amber">Late by {minText(lm)}</span> : <span className="tag">On Time</span>;
+            const st = off ? <span className="tag grey">Day Off</span> : !rec && ds < TRACK_START ? <span className="tag grey">Before Tracking</span> : !rec ? (ds === TODAY ? <span className="tag grey">Today</span> : <span className="tag red">Absent</span>) : !rec.out && ds < YEST ? <span className="tag red">No Check-Out</span> : lm > 0 ? <span className="tag amber">Late by {minText(lm)}</span> : <span className="tag">On Time</span>;
             return <tr key={ds}><td>{niceDate(ds)}</td><td>{rec ? timeText(rec.in, s) : "—"}</td><td>{rec ? timeText(rec.out, s) : "—"}</td><td>{rec?.method || "—"}</td><td>{st}</td>
-              <td><button className="btn small" onClick={() => { setErr(""); setEdit({ date: ds, in: rec?.in || s.start, out: rec?.out || "", reason: "" }); }}>{rec ? "Correct" : "Add Entry"}</button></td></tr>;
+              <td><div className="row" style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
+                <button className="btn small" onClick={() => { setErr(""); setEdit({ date: ds, in: rec?.in || s.start, out: rec?.out || "", reason: "" }); }}>{rec ? "Edit" : "Add Entry"}</button>
+                {rec && <button className="btn small danger" onClick={() => remove(ds)}>Delete</button>}</div></td></tr>;
           })}</tbody></table>
       </div>
     </>
   );
 }
 
-const blankForm = () => ({ name: "", role: "", pin: "", joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthMode: "auto", monthHours: "", off: [], leaves: 4, grace: 10, from: TODAY });
+const blankForm = () => ({ name: "", role: "", pin: "", notes: "", joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthMode: "auto", monthHours: "", off: [], leaves: 4, grace: 10, from: TODAY });
 const monthText = v => v === -1 ? "Automatic" : v ? `${v} hrs/month` : "No limit";
 
 function Employees({ db, act }) {
   const [form, setForm] = useState(null); const [err, setErr] = useState("");
   const f = (k, v) => setForm({ ...form, [k]: v });
-  const openEdit = e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; setErr(""); setForm({ editId: e.id, name: e.name, role: e.role, pin: "", joined: e.joined, left: e.left || "", ...s, monthMode: s.monthHours === -1 ? "auto" : s.monthHours ? "fixed" : "none", monthHours: s.monthHours > 0 ? s.monthHours : "", monthHours: s.monthHours ?? "", off: [...s.off], from: TODAY }); };
+  const openEdit = e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; setErr(""); setForm({ editId: e.id, name: e.name, role: e.role, pin: "", joined: e.joined, left: e.left || "", notes: e.notes || "", ...s, monthMode: s.monthHours === -1 ? "auto" : s.monthHours ? "fixed" : "none", monthHours: s.monthHours > 0 ? s.monthHours : "", monthHours: s.monthHours ?? "", off: [...s.off], from: TODAY }); };
   const save = async () => {
     const n = ["salary", "hours", "leaves", "grace"]; const vals = Object.fromEntries(n.map(k => [k, Number(form[k])]));
     if (!form.name.trim()) return setErr("Please enter the employee's name.");
@@ -358,6 +366,8 @@ function Employees({ db, act }) {
             <div className="field"><label>Grace period (minutes)</label><input type="number" value={form.grace} onChange={e => f("grace", e.target.value)} /></div>
             {form.editId && <div className="field"><label>Effective from</label><input type="date" value={form.from} onChange={e => f("from", e.target.value)} /></div>}
           </div>
+          <div className="field" style={{ marginBottom: 12 }}><label>Remarks (for admins only; not used in any calculation)</label>
+            <textarea rows={2} maxLength={500} value={form.notes} placeholder="e.g. Usual day off: Sunday. Prefers evening shifts." onChange={e => f("notes", e.target.value)} /></div>
           {form.monthMode === "auto" && <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>Automatic allowed hours = daily working hours × (days in the month − weekly days off). For example, 10 hours a day with no weekly day off gives 280 hours in a 28-day month, 300 in a 30-day month and 310 in a 31-day month. Paid leaves not taken are paid extra in Payroll.</p>}
           {form.start && form.end && overnight(form) && <div className="notice" style={{ marginBottom: 12 }}>Night shift: ends the following morning. Attendance is recorded under the shift's start date, and the weekly day off refers to the night the shift would begin.</div>}
           <span className="lbl">Weekly day off</span>
@@ -365,14 +375,15 @@ function Employees({ db, act }) {
           <div className="row"><button className="btn primary" onClick={save}>{form.editId ? "Save Changes" : "Add Employee"}</button><button className="btn" onClick={() => setForm(null)}>Cancel</button></div>
           {err && <div className="err">{err}</div>}
           {editing && <><h2 style={{ marginTop: 20 }}>Settings History</h2>
-            <table className="t"><thead><tr><th>Effective From</th><th>Salary</th><th>Shift</th><th>Hours/Day</th><th>Hours/Month</th><th>Paid Leaves</th><th>Grace</th></tr></thead>
-              <tbody>{editing.history.slice().reverse().map(h => <tr key={h.from}><td>{niceDate(h.from)}</td><td>{rs(h.salary)}</td><td>{shiftText(h)}</td><td>{h.hours}</td><td>{monthText(h.monthHours)}</td><td>{h.leaves}</td><td>{h.grace} min</td></tr>)}</tbody></table></>}
+            <table className="t"><thead><tr><th>Effective From</th><th>Salary</th><th>Shift</th><th>Hours/Day</th><th>Hours/Month</th><th>Paid Leaves</th><th>Grace</th><th>Day Off</th><th>Changed By</th></tr></thead>
+              <tbody>{editing.history.slice().reverse().map(h => <tr key={h.from}><td className="nw">{longDate(h.from)}</td><td>{rs(h.salary)}</td><td>{shiftText(h)}</td><td>{h.hours}</td><td>{monthText(h.monthHours)}</td><td>{h.leaves}</td><td>{h.grace} min</td><td>{h.off.map(i => DAYS[i]).join(", ") || "None"}</td><td className="nw">{h.changedBy ? <>{h.changedBy}<div className="muted">{h.changedAt}</div></> : <span className="muted">Before records</span>}</td></tr>)}</tbody></table>
+            <p className="muted" style={{ fontSize: 13, marginTop: 8 }}>Each row applies from its date until the next row. A pay raise or new duty hours appear here as a new row; earlier months keep the old figures.</p></>}
         </div>
       ) : <div style={{ marginBottom: 18 }}><button className="btn primary" onClick={() => { setErr(""); setForm(blankForm()); }}>Add Employee</button></div>}
       <div className="panel">
         <table className="t"><thead><tr><th>Employee</th><th>Employment</th><th>Salary</th><th>Shift</th><th>Hours</th><th>Day Off</th><th>Paid Leaves</th><th>Grace</th><th></th></tr></thead>
           <tbody>{[...db.employees].sort((a, b) => isGone(a) - isGone(b)).map(e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; return (
-            <tr key={e.id}><td><b>{e.name}</b><div className="muted">{e.role}</div><div className="muted">{e.id}</div></td>
+            <tr key={e.id}><td><b>{e.name}</b><div className="muted">{e.role}</div><div className="muted">{e.id}</div>{e.notes && <div className="remark">{e.notes}</div>}</td>
               <td className="nw">Joined {longDate(e.joined)}{e.left && <div style={{ marginTop: 4 }}>{isGone(e) ? <span className="tag grey">Resigned</span> : <span className="tag amber">Leaving</span>} <span className="muted">{longDate(e.left)}</span></div>}</td>
               <td className="nw">{rs(s.salary)}</td><td className="nw">{fmt(s.start)} – {fmt(s.end)}{overnight(s) && <div className="muted">Night shift</div>}</td><td className="nw">{s.hours} hrs/day<div className="muted">{s.monthHours === -1 ? "Automatic monthly hours" : s.monthHours ? `${s.monthHours} hrs/month` : "No monthly limit"}</div></td><td>{s.off.map(i => DAYS[i]).join(", ") || "None"}</td><td className="nw">{s.leaves} / month</td><td className="nw">{s.grace} min</td>
               <td><button className="btn small" onClick={() => openEdit(e)}>Edit</button></td></tr>); })}</tbody></table>
@@ -478,10 +489,10 @@ function Salary({ db }) {
   return (
     <>
       <h1>Payroll</h1>
-      <p className="sub">Daily rate is the monthly salary divided by the days in the month. Absences beyond the paid leaves and late minutes beyond the grace period are deducted. Paid leaves not taken are paid extra at the daily rate when the month ends, and approved overtime is added. Select an employee to view the full calculation.</p>
+      <p className="sub">Daily rate is the monthly salary divided by the days in the month. For the current month, Net Payable assumes the remaining days are worked. Absences beyond the paid leaves and late minutes beyond the grace period are deducted. Paid leaves not taken are paid extra at the daily rate when the month ends, and approved overtime is added. Select an employee to view the full calculation.</p>
       <div className="printhead">Haazir, eco Pharmacy: Payroll for {monthName(month)}{inProgress ? " (in progress, calculated to yesterday)" : ""}. Printed {longDate(TODAY)}.</div>
       <div className="row" style={{ marginBottom: 14, alignItems: "center" }}><MonthPick value={month} onChange={v => { setMonth(v); setOpen(null); }} />
-        {inProgress && <span className="tag amber">In Progress: Calculated to Yesterday</span>}
+        {inProgress && <span className="tag amber">In Progress: Deductions to Yesterday</span>}
         <ExportButtons onExcel={() => saveBlob(makeXlsx("Payroll " + month, [
           ["Employee ID", "Name", "Month", "Salary for Month", "Daily Rate", "Days Present", "Absences", "Covered by Paid Leave", "Unpaid Absences", "Absence Deduction", "Times Late", "Minutes Late (beyond grace)", "Late Deduction", "Unused Paid Leaves", "Unused Leave Pay", "Approved Overtime (hrs)", "Overtime Pay", "Net Payable"],
           ...rows.map(({ e, c }) => [e.id, e.name, monthName(month), r2(c.base), r2(c.daily), c.present, c.absences, c.covered, c.unpaid, r2(c.absDed), c.lateCount, c.lateMins, r2(c.lateDed), c.inProgress ? "At month end" : c.unusedLeaves, r2(c.leavePay), c.otHours, r2(c.otPay), r2(c.payable)]),
@@ -497,8 +508,9 @@ function Salary({ db }) {
               <td className="r">{c.leavePay ? "+ " + rs(c.leavePay) : c.inProgress ? <span className="muted">Month end</span> : "—"}</td>
               <td className="r">{c.otPay ? "+ " + rs(c.otPay) : "—"}</td><td className="r"><b>{rs(c.payable)}</b></td></tr>,
             open === e.id && <tr key={e.id + "x"}><td colSpan={7}><div className="breakdown">
-              <div><span>Salary for {monthName(month)}{e.history.length > 1 || e.joined.startsWith(month) || e.left?.startsWith(month) ? " (adjusted for changes, joining or resign date)" : ""}</span><span>{rs(c.base)}</span></div>
+              <div><span>Salary for {c.empDays === c.dim ? `all of ${monthName(month)}` : `${c.empDays} of ${c.dim} days in ${monthName(month)} (${niceDate(c.firstDay)} to ${niceDate(c.lastDay)})`}{c.inProgress ? ", if every remaining day is worked" : ""}</span><span>{rs(c.base)}</span></div>
               <div><span>Daily rate</span><span>{rs(c.daily)}</span></div>
+              {c.untracked > 0 && <div><span>Paid in full before attendance tracking started ({longDate(TRACK_START)}): {c.untracked} days</span><span>Rs 0</span></div>}
               <div><span>Days present</span><span>{c.present}</span></div>
               <div><span>Absences: {c.absences}, covered by paid leave: {c.covered} of {c.leaves}, unpaid: {c.unpaid}</span><span>{c.absDed ? "− " + rs(c.absDed) : "Rs 0"}</span></div>
               <div><span>{c.inProgress ? `Unused paid leaves: calculated when the month ends (${Math.max(0, c.leaves - c.absences)} unused so far)` : `Unused paid leaves: ${c.unusedLeaves} × daily rate`}</span><span>{c.leavePay ? "+ " + rs(c.leavePay) : "Rs 0"}</span></div>
@@ -556,6 +568,21 @@ function NetworkTab({ db, act }) {
   );
 }
 
+function TrackingStart({ db, act }) {
+  const [d, setD] = useState(db.trackingStart || TODAY); const [err, setErr] = useState("");
+  return (
+    <div className="panel">
+      <h2>Attendance Tracking Start</h2>
+      <p>Haazir checks attendance from this date. Working days before it are paid in full and never counted as absences, because attendance was not recorded in Haazir yet. Set it to the day your staff started checking in with Haazir.</p>
+      <div className="row">
+        <div className="field" style={{ width: 200 }}><label>Start date</label><input type="date" value={d} max={TODAY} onChange={e => setD(e.target.value)} /></div>
+        <button className="btn primary" disabled={d === db.trackingStart} onClick={() => act("/api/settings/tracking", { date: d }, setErr)}>Save Date</button>
+      </div>
+      {err && <div className="err">{err}</div>}
+    </div>
+  );
+}
+
 function Access({ db, act }) {
   const [form, setForm] = useState({ name: "", username: "", role: "Admin", password: "" }); const [err, setErr] = useState("");
   const modes = [["both", "Biometric and PIN", "Both are required for every check-in. Recommended."],
@@ -568,6 +595,7 @@ function Access({ db, act }) {
   return (
     <>
       <h1>Admins & Security</h1>
+      <TrackingStart db={db} act={act} />
       <div className="panel">
         <h2>Check-In Verification</h2>
         <p className="muted">Fingerprint and face unlock work in the Haazir Android app. If a phone has no fingerprint or face unlock set up, the PIN is used instead. In a phone browser, such as Safari on iPhone, the PIN is used until Haazir is online with a secure address.</p>
@@ -895,7 +923,7 @@ function AdminApp() {
     try {
       const data = await api("/api/state");
       const first = data.employees.map(e => e.joined).sort()[0];
-      setClock(data.today, first);
+      setClock(data.today, first, data.trackingStart);
       setDb(data); setPhase("ready");
     } catch (e) {
       if (e.status === 401) {

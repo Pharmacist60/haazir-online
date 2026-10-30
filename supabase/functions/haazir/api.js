@@ -5,15 +5,15 @@ import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
 import * as L from './logic.js';
 
-export const VERSION = '1.3.0';
+export const VERSION = '1.6.0';
 
 /* ---------------- database layout ---------------- */
 // Every table, with its columns. Used to create the database, and to back up and restore it.
 const TABLES = {
   settings: ['key', 'value'],
   admins: ['username', 'name', 'role', 'pass_hash', 'created_at', 'notify', 'last_seen'],
-  employees: ['id', 'name', 'role', 'pin_hash', 'joined', 'left_date', 'device_id', 'created_at'],
-  emp_settings: ['emp_id', 'eff_from', 'salary', 'start_time', 'end_time', 'hours', 'month_hours', 'off_days', 'leaves', 'grace'],
+  employees: ['id', 'name', 'role', 'pin_hash', 'joined', 'left_date', 'device_id', 'created_at', 'notes'],
+  emp_settings: ['emp_id', 'eff_from', 'salary', 'start_time', 'end_time', 'hours', 'month_hours', 'off_days', 'leaves', 'grace', 'changed_by', 'changed_at'],
   devices: ['id', 'emp_id', 'label', 'status', 'is_change', 'requested_at', 'pin_fails', 'locked_until'],
   attendance: ['id', 'emp_key', 'date', 'in_time', 'out_time', 'method', 'created_at'],
   overtime: ['emp_id', 'date', 'hours', 'rate', 'approved_by'],
@@ -32,8 +32,8 @@ function schema(dialect) {
   return [
     `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS admins (username TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, pass_hash TEXT NOT NULL, created_at TEXT NOT NULL, notify TEXT NOT NULL DEFAULT '${DEFAULT_NOTIFY}', last_seen INTEGER NOT NULL DEFAULT 0)`,
-    `CREATE TABLE IF NOT EXISTS employees (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '', pin_hash TEXT NOT NULL, joined TEXT NOT NULL, left_date TEXT, device_id TEXT, created_at TEXT NOT NULL)`,
-    `CREATE TABLE IF NOT EXISTS emp_settings (emp_id TEXT NOT NULL, eff_from TEXT NOT NULL, salary ${REAL} NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, hours ${REAL} NOT NULL, month_hours ${REAL}, off_days TEXT NOT NULL, leaves INTEGER NOT NULL, grace INTEGER NOT NULL, PRIMARY KEY (emp_id, eff_from))`,
+    `CREATE TABLE IF NOT EXISTS employees (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '', pin_hash TEXT NOT NULL, joined TEXT NOT NULL, left_date TEXT, device_id TEXT, created_at TEXT NOT NULL, notes TEXT)`,
+    `CREATE TABLE IF NOT EXISTS emp_settings (emp_id TEXT NOT NULL, eff_from TEXT NOT NULL, salary ${REAL} NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, hours ${REAL} NOT NULL, month_hours ${REAL}, off_days TEXT NOT NULL, leaves INTEGER NOT NULL, grace INTEGER NOT NULL, changed_by TEXT, changed_at TEXT, PRIMARY KEY (emp_id, eff_from))`,
     `CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, emp_id TEXT NOT NULL, label TEXT NOT NULL, status TEXT NOT NULL, is_change INTEGER NOT NULL DEFAULT 0, requested_at TEXT NOT NULL, pin_fails INTEGER NOT NULL DEFAULT 0, locked_until ${REAL} NOT NULL DEFAULT 0)`,
     `CREATE TABLE IF NOT EXISTS attendance (id ${ID}, emp_key TEXT NOT NULL, date TEXT NOT NULL, in_time TEXT NOT NULL, out_time TEXT, method TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE (emp_key, date))`,
     `CREATE TABLE IF NOT EXISTS overtime (emp_id TEXT NOT NULL, date TEXT NOT NULL, hours ${REAL} NOT NULL, rate ${REAL} NOT NULL, approved_by TEXT NOT NULL, PRIMARY KEY (emp_id, date))`,
@@ -82,7 +82,15 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   const audit = (by, what) => run('INSERT INTO audit (at, by_user, what) VALUES (?, ?, ?)', L.stamp(), by, what);
 
   let schemaReady = null;
-  const ensureSchema = () => (schemaReady = schemaReady || (async () => { for (const s of schema(db.dialect)) await db.exec(s); })().catch(e => { schemaReady = null; throw e; }));
+  // Columns added in later versions (ignored if they already exist).
+  const UPGRADES = [['employees', 'notes TEXT'], ['emp_settings', 'changed_by TEXT'], ['emp_settings', 'changed_at TEXT']];
+  const ensureSchema = () => (schemaReady = schemaReady || (async () => {
+    for (const s of schema(db.dialect)) await db.exec(s);
+    for (const [t, col] of UPGRADES) {
+      try { await db.exec(db.dialect === 'pg' ? `ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS ${col}` : `ALTER TABLE ${t} ADD COLUMN ${col}`); }
+      catch (e) { if (!/duplicate|exists/i.test(e.message)) throw e; }
+    }
+  })().catch(e => { schemaReady = null; throw e; }));
 
   /* ----- network: the pharmacy's internet address ----- */
   const clientIP = req => {
@@ -107,10 +115,11 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   async function employees() {
     const sets = await all('SELECT * FROM emp_settings ORDER BY eff_from');
     return (await all('SELECT * FROM employees ORDER BY id')).map(e => ({
-      id: e.id, name: e.name, role: e.role, joined: e.joined, left: e.left_date || null, phone: e.device_id || null,
+      id: e.id, name: e.name, role: e.role, joined: e.joined, left: e.left_date || null, phone: e.device_id || null, notes: e.notes || '',
       history: sets.filter(s => s.emp_id === e.id).map(s => ({
         from: s.eff_from, salary: Number(s.salary), start: s.start_time, end: s.end_time, hours: Number(s.hours),
         monthHours: s.month_hours == null ? null : Number(s.month_hours), off: JSON.parse(s.off_days), leaves: Number(s.leaves), grace: Number(s.grace),
+        changedBy: s.changed_by || null, changedAt: s.changed_at || null,
       })),
     }));
   }
@@ -157,6 +166,17 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     return false;
   }
 
+  // The day attendance tracking started. Set at owner setup; for older installations, the first attendance date.
+  async function trackingStartDate() {
+    let d = await getSetting('tracking_start');
+    if (!d) {
+      const first = await one('SELECT MIN(date) AS d FROM attendance');
+      d = (first && first.d) || L.today();
+      await setSetting('tracking_start', d);
+    }
+    return d;
+  }
+
   /* ----- notifications ----- */
   const EVENT_TYPES = ['checkin', 'checkout', 'late', 'absent', 'overleave', 'pinreset'];
   async function addEvent(type, empId, text, uniq = null) {
@@ -165,7 +185,8 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     catch (e) { if (!/unique|duplicate/i.test(e.message)) throw e; }
   }
   async function priorAbsences(e, date) {
-    const first = date.slice(0, 8) + '01';
+    const start = await trackingStartDate();
+    const first = date.slice(0, 8) + '01' > start ? date.slice(0, 8) + '01' : start;
     const recs = new Set((await all('SELECT date FROM attendance WHERE emp_key = ? AND date >= ? AND date < ?', e.id, first, date)).map(r => r.date));
     let n = 0;
     for (let ds = first; ds < date; ds = L.addDays(ds, 1)) {
@@ -177,11 +198,12 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   }
   async function checkAbsences() {
     const T = L.today(), Y = L.addDays(T, -1), nowM = L.toMin(L.nowTime());
+    const start = await trackingStartDate();
     for (const e of await employees()) {
       if (L.isGone(e)) continue;
       for (const date of [Y, T]) {
         const s = L.settingsOn(e, date);
-        if (!s || !L.employed(e, date) || s.off.includes(L.weekday(date))) continue;
+        if (!s || !L.employed(e, date) || s.off.includes(L.weekday(date)) || date < start) continue;
         if (date === Y && !L.overnight(s)) continue;
         const since = nowM + (date === Y ? 1440 : 0) - L.toMin(s.start);
         if (since < s.grace || since > 16 * 60) continue;
@@ -279,6 +301,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     need(password.length >= 8, 'The password must be at least 8 characters.');
     await run('INSERT INTO admins (username, name, role, pass_hash, created_at) VALUES (?, ?, ?, ?, ?)', username, name, 'Super Admin', hashSecret(password), L.stamp());
     await setSetting('mode', 'both');
+    await setSetting('tracking_start', L.today());
     await audit(`${name} (Super Admin)`, 'Created the Haazir owner account');
     await setupCron();
     return { ok: true, token: await startSession(username) };
@@ -308,6 +331,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   route('GET', '/api/state', async ({ req }) => {
     const a = await requireAdmin(req), sup = a.role === 'Super Admin';
     const since = L.addDays(L.today(), -400);
+    const trackingStart = await trackingStartDate();
     if (sup && db.dialect === 'pg' && !cronTried && (await getSetting('cron')) !== 'ok') { cronTried = true; await setupCron(); }
     return {
       today: L.today(), now: L.nowTime(), version: VERSION, hosted: true, update: null,
@@ -324,6 +348,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
       admins: sup ? await all('SELECT username, name, role FROM admins ORDER BY role DESC, name') : [],
       audit: sup ? await all('SELECT at, by_user AS by, what FROM audit ORDER BY id DESC LIMIT 500') : [],
       cron: sup ? await getSetting('cron', '') : '',
+      trackingStart,
     };
   });
 
@@ -351,9 +376,21 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     return { ok: true };
   });
 
+  route('POST', '/api/attendance/delete', async ({ req, body: b }) => {
+    const a = await requireAdmin(req);
+    const e = await employee(b.empId); need(e, 'Employee not found.', 404);
+    const reason = String(b.reason || '').trim(); need(reason, 'A reason is required to delete an entry.');
+    const rec = await one('SELECT * FROM attendance WHERE emp_key = ? AND date = ?', e.id, String(b.date || ''));
+    need(rec, 'This entry no longer exists.', 404);
+    await run('DELETE FROM attendance WHERE id = ?', rec.id);
+    await audit(adminLabel(a), `Deleted attendance for ${e.name} on ${L.niceDate(rec.date)} (${L.fmt(rec.in_time)} – ${rec.out_time ? L.fmt(rec.out_time) : 'no check-out'}, ${rec.method}). Reason: ${reason}`);
+    return { ok: true };
+  });
+
   route('POST', '/api/employees/save', async ({ req, body: b }) => {
     const a = await requireAdmin(req);
     const name = String(b.name || '').trim(), role = String(b.role || '').trim(), pin = String(b.pin || '');
+    const notes = String(b.notes || '').trim().slice(0, 500);
     need(name, "Please enter the employee's name.");
     const old = b.editId ? await employee(b.editId) : null;
     if (b.editId) need(old, 'Employee not found.', 404);
@@ -372,11 +409,11 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     const summary = `${rs(entry.salary)}, ${L.shiftText(entry)}, ${entry.hours} hrs/day, ${entry.monthHours === -1 ? 'automatic monthly hours' : entry.monthHours ? entry.monthHours + ' hrs/month allowed' : 'no monthly hours limit'}, ${entry.leaves} paid leaves/month, ${entry.grace} min grace`;
     await db.tx(async t => {
       const q = (sql, ...p) => t.all(sql, p);
-      const saveSettings = id => q(`INSERT INTO emp_settings (emp_id, eff_from, salary, start_time, end_time, hours, month_hours, off_days, leaves, grace) VALUES (?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT (emp_id, eff_from) DO UPDATE SET salary = excluded.salary, start_time = excluded.start_time, end_time = excluded.end_time, hours = excluded.hours, month_hours = excluded.month_hours, off_days = excluded.off_days, leaves = excluded.leaves, grace = excluded.grace`,
-        id, entry.from, entry.salary, entry.start, entry.end, entry.hours, entry.monthHours, JSON.stringify(entry.off), entry.leaves, entry.grace);
+      const saveSettings = id => q(`INSERT INTO emp_settings (emp_id, eff_from, salary, start_time, end_time, hours, month_hours, off_days, leaves, grace, changed_by, changed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT (emp_id, eff_from) DO UPDATE SET salary = excluded.salary, start_time = excluded.start_time, end_time = excluded.end_time, hours = excluded.hours, month_hours = excluded.month_hours, off_days = excluded.off_days, leaves = excluded.leaves, grace = excluded.grace, changed_by = excluded.changed_by, changed_at = excluded.changed_at`,
+        id, entry.from, entry.salary, entry.start, entry.end, entry.hours, entry.monthHours, JSON.stringify(entry.off), entry.leaves, entry.grace, by, L.stamp());
       if (old) {
-        await q('UPDATE employees SET name = ?, role = ?, joined = ?, left_date = ? WHERE id = ?', name, role, b.joined, b.left || null, old.id);
+        await q('UPDATE employees SET name = ?, role = ?, joined = ?, left_date = ?, notes = ? WHERE id = ?', name, role, b.joined, b.left || null, notes, old.id);
         if (pin) { await q('UPDATE employees SET pin_hash = ? WHERE id = ?', hashSecret(pin), old.id); await q('UPDATE devices SET pin_fails = 0, locked_until = 0 WHERE emp_id = ?', old.id); }
         await saveSettings(old.id);
         const first = (await q('SELECT eff_from FROM emp_settings WHERE emp_id = ? ORDER BY eff_from LIMIT 1', old.id))[0];
@@ -385,10 +422,11 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
         if (old.joined !== b.joined) await q('INSERT INTO audit (at, by_user, what) VALUES (?, ?, ?)', L.stamp(), by, `Changed ${name}'s joining date to ${L.longDate(b.joined)}`);
         if ((old.left || '') !== (b.left || '')) await q('INSERT INTO audit (at, by_user, what) VALUES (?, ?, ?)', L.stamp(), by, b.left ? `Recorded resignation for ${name}, last working day ${L.longDate(b.left)}` : `Removed resign date for ${name}`);
         if (pin) await q('INSERT INTO audit (at, by_user, what) VALUES (?, ?, ?)', L.stamp(), by, `Changed ${name}'s PIN`);
+        if ((old.notes || '') !== notes) await q('INSERT INTO audit (at, by_user, what) VALUES (?, ?, ?)', L.stamp(), by, notes ? `Updated remarks for ${name}: ${notes}` : `Removed remarks for ${name}`);
       } else {
         const max = (await q('SELECT id FROM employees')).map(r => Number(r.id.slice(1)) || 0).reduce((m, n) => Math.max(m, n), 0);
         const id = 'E' + String(max + 1).padStart(3, '0');
-        await q('INSERT INTO employees (id, name, role, pin_hash, joined, left_date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', id, name, role, hashSecret(pin), b.joined, b.left || null, L.stamp());
+        await q('INSERT INTO employees (id, name, role, pin_hash, joined, left_date, created_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', id, name, role, hashSecret(pin), b.joined, b.left || null, L.stamp(), notes);
         await saveSettings(id);
         await q('INSERT INTO audit (at, by_user, what) VALUES (?, ?, ?)', L.stamp(), by, `Added employee ${name} (${id}) joining ${L.niceDate(b.joined)} at ${rs(entry.salary)}`);
       }
@@ -472,6 +510,13 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     const n = await one('SELECT * FROM networks WHERE id = ?', Number(b.id)); need(n, 'Network not found.', 404);
     await run('DELETE FROM networks WHERE id = ?', n.id);
     await audit(adminLabel(a), `Removed "${n.name}" from pharmacy networks`);
+    return { ok: true };
+  });
+  route('POST', '/api/settings/tracking', async ({ req, body: b }) => {
+    const a = await requireAdmin(req, true);
+    need(L.isDate(b.date) && b.date <= L.today(), 'Choose a date that is not in the future.');
+    await setSetting('tracking_start', b.date);
+    await audit(adminLabel(a), `Set the attendance tracking start date to ${L.longDate(b.date)}`);
     return { ok: true };
   });
   route('POST', '/api/settings/mode', async ({ req, body: b }) => {
