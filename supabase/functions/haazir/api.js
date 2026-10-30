@@ -5,7 +5,7 @@ import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
 import * as L from './logic.js';
 
-export const VERSION = '1.7.1';
+export const VERSION = '1.8.0';
 
 /* ---------------- database layout ---------------- */
 // Every table, with its columns. Used to create the database, and to back up and restore it.
@@ -517,7 +517,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     return { ok: true };
   });
   route('POST', '/api/settings/tracking', async ({ req, body: b }) => {
-    const a = await requireAdmin(req, true);
+    const a = await requireAdmin(req);
     need(L.isDate(b.date) && b.date <= L.today(), 'Choose a date that is not in the future.');
     await setSetting('tracking_start', b.date);
     await audit(adminLabel(a), `Set the attendance tracking start date to ${L.longDate(b.date)}`);

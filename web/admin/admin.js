@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.7.1";
+const APP_VERSION = "1.8.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -340,7 +340,7 @@ function dayKind(rec, s) {
 function calcSalary(e, ym, attendance, overtime) {
     const [y, m] = ym.split("-").map(Number);
     const dim = daysIn(y, m);
-    let base = 0, earnedBase = 0, lateDed = 0, lateCount = 0, lateMins = 0, otPay = 0, otHours = 0, present = 0, untracked = 0, halfDays = 0, shortDays = 0;
+    let base = 0, earnedBase = 0, doneDays = 0, remaining = 0, lateDed = 0, lateCount = 0, lateMins = 0, otPay = 0, otHours = 0, present = 0, untracked = 0, halfDays = 0, shortDays = 0;
     const missed = []; // days counted as absence: { ds, dp, units } (1 = full day, 0.5 = half day)
     let absentDays = 0;
     const lastS = settingsOn(e, `${ym}-${pad(dim)}`);
@@ -351,20 +351,25 @@ function calcSalary(e, ym, attendance, overtime) {
         const s = settingsOn(e, ds);
         if (!s)
             continue;
-        const dp = s.salary / dim;
-        base += dp;
-        const rec = attendance.find(a => a.synced && a.empId === e.id && a.date === ds);
-        // "Earned so far" counts every day up to yesterday, plus today once today's check-out is done.
-        if (ds < TODAY || (ds === TODAY && rec && rec.out))
-            earnedBase += dp;
-        else
-            continue;
-        if (s.off.includes(weekday(ds)))
-            continue;
-        if (!rec && ds < TRACK_START) {
+        // Days before attendance tracking started are not part of Haazir's payroll.
+        if (ds < TRACK_START) {
             untracked++;
             continue;
         }
+        const dp = s.salary / dim;
+        base += dp;
+        const rec = attendance.find(a => a.synced && a.empId === e.id && a.date === ds);
+        // Only completed days are paid: every day up to yesterday, plus today once today's check-out is done.
+        if (ds < TODAY || (ds === TODAY && rec && rec.out)) {
+            earnedBase += dp;
+            doneDays++;
+        }
+        else {
+            remaining++;
+            continue;
+        }
+        if (s.off.includes(weekday(ds)))
+            continue;
         if (!rec) {
             missed.push({ ds, dp, units: 1 });
             absentDays++;
@@ -421,7 +426,7 @@ function calcSalary(e, ym, attendance, overtime) {
     const unusedLeaves = Math.max(0, leaves - usedUnits);
     const leavePay = inProgress ? 0 : unusedLeaves * daily;
     const earned = earnedBase - absDed - lateDed + otPay + leavePay;
-    return { base, earnedBase, earned, present, absences: absentDays, halfDays, shortDays, usedUnits, leaves, covered, unpaid: unpaidUnits, absDed, unusedLeaves, leavePay, lateCount, lateMins, lateDed, otHours, otPay, payable: base - absDed - lateDed + otPay + leavePay, inProgress, daily, empDays, dim, firstDay, lastDay, untracked };
+    return { base, earnedBase, earned, present, absences: absentDays, halfDays, shortDays, usedUnits, leaves, covered, unpaid: unpaidUnits, absDed, unusedLeaves, leavePay, lateCount, lateMins, lateDed, otHours, otPay, payable: earned, inProgress, daily, empDays, dim, firstDay, lastDay, untracked, doneDays, remaining };
 }
 function Copyright() {
     return React.createElement("div", { className: "copy" },
@@ -1142,6 +1147,7 @@ function RecordsInner({ db, act }) {
     };
     return (React.createElement(React.Fragment, null,
         React.createElement("h1", null, "Attendance Records"),
+        React.createElement(TrackingStart, { db: db, act: act }),
         React.createElement("p", { className: "sub" }, "Add missing entries, edit wrong times, or delete entries made by mistake. Every change is recorded in the audit log with its reason. Night shifts appear under the date they began."),
         React.createElement("div", { className: "panel" },
             React.createElement("div", { className: "row", style: { marginBottom: 12 } },
@@ -1533,12 +1539,12 @@ const r2 = n => Math.round(n * 100) / 100;
 function Salary({ db }) {
     const [month, setMonth] = useState(TODAY.slice(0, 7));
     const [open, setOpen] = useState(null);
-    const rows = db.employees.map(e => ({ e, c: calcSalary(e, month, db.attendance, db.overtime) })).filter(r => r.c.base > 0);
+    const rows = db.employees.map(e => ({ e, c: calcSalary(e, month, db.attendance, db.overtime) })).filter(r => r.c.base > 0 || r.c.untracked > 0);
     const total = rows.reduce((t, r) => t + r.c.payable, 0);
     const inProgress = rows[0]?.c.inProgress;
     return (React.createElement(React.Fragment, null,
         React.createElement("h1", null, "Payroll"),
-        React.createElement("p", { className: "sub" }, "Daily rate is the monthly salary divided by the days in the month. Earned So Far covers the days completed up to now; Net Payable is the full month if every remaining day is worked. Leaving early beyond the early leave grace counts as a half day or an absence (see Admins & Security). Absences beyond the paid leaves and late minutes beyond the grace period are deducted. Paid leaves not taken are paid extra at the daily rate when the month ends, and approved overtime is added. Select an employee to view the full calculation."),
+        React.createElement("p", { className: "sub" }, "Daily rate is the monthly salary divided by the days in the month. Payroll counts only completed days: every day up to yesterday, plus today once the employee has checked out. Remaining days of the month are added as they are completed. Days before the attendance tracking start date are not included. Leaving early beyond the early leave grace counts as a half day or an absence (see Admins & Security). Absences beyond the paid leaves and late minutes beyond the grace period are deducted. Paid leaves not taken are paid extra at the daily rate when the month ends, and approved overtime is added. Select an employee to view the full calculation."),
         React.createElement("div", { className: "printhead" },
             "Haazir, eco Pharmacy: Payroll for ",
             monthName(month),
@@ -1548,23 +1554,22 @@ function Salary({ db }) {
             "."),
         React.createElement("div", { className: "row", style: { marginBottom: 14, alignItems: "center" } },
             React.createElement(MonthPick, { value: month, onChange: v => { setMonth(v); setOpen(null); } }),
-            inProgress && React.createElement("span", { className: "tag amber" }, "In Progress: Deductions to Yesterday"),
+            inProgress && React.createElement("span", { className: "tag amber" }, "In Progress: Completed Days Only"),
             React.createElement(ExportButtons, { onExcel: () => saveBlob(makeXlsx("Payroll " + month, [
-                    ["Employee ID", "Name", "Month", "Salary for Month", "Daily Rate", "Days Present", "Absences", "Half Days", "Short Days", "Leave Days Covered", "Unpaid Days", "Absence Deduction", "Times Late", "Minutes Late (beyond grace)", "Late Deduction", "Unused Paid Leaves", "Unused Leave Pay", "Approved Overtime (hrs)", "Overtime Pay", "Earned So Far", "Net Payable"],
-                    ...rows.map(({ e, c }) => [e.id, e.name, monthName(month), r2(c.base), r2(c.daily), c.present, c.absences, c.halfDays, c.shortDays, c.covered, c.unpaid, r2(c.absDed), c.lateCount, c.lateMins, r2(c.lateDed), c.inProgress ? "At month end" : c.unusedLeaves, r2(c.leavePay), c.otHours, r2(c.otPay), r2(c.earned), r2(c.payable)]),
-                    ["", "Total", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", r2(rows.reduce((t, r) => t + r.c.earned, 0)), r2(total)],
+                    ["Employee ID", "Name", "Month", "Days Counted", "Salary for Days Counted", "Daily Rate", "Days Present", "Absences", "Half Days", "Short Days", "Leave Days Covered", "Unpaid Days", "Absence Deduction", "Times Late", "Minutes Late (beyond grace)", "Late Deduction", "Unused Paid Leaves", "Unused Leave Pay", "Approved Overtime (hrs)", "Overtime Pay", "Net Payable"],
+                    ...rows.map(({ e, c }) => [e.id, e.name, monthName(month), c.doneDays, r2(c.earnedBase), r2(c.daily), c.present, c.absences, c.halfDays, c.shortDays, c.covered, c.unpaid, r2(c.absDed), c.lateCount, c.lateMins, r2(c.lateDed), c.inProgress ? "At month end" : c.unusedLeaves, r2(c.leavePay), c.otHours, r2(c.otPay), r2(c.payable)]),
+                    ["", "Total", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", r2(total)],
                 ]), `Haazir Payroll ${month}.xlsx`) })),
         React.createElement("div", { className: "panel" },
             React.createElement("table", { className: "t" },
                 React.createElement("thead", null,
                     React.createElement("tr", null,
                         React.createElement("th", null, "Employee"),
-                        React.createElement("th", { className: "r" }, "Salary"),
+                        React.createElement("th", { className: "r" }, "Salary Earned"),
                         React.createElement("th", { className: "r" }, "Absences"),
                         React.createElement("th", { className: "r" }, "Late"),
                         React.createElement("th", { className: "r" }, "Unused Leave"),
                         React.createElement("th", { className: "r" }, "Overtime"),
-                        React.createElement("th", { className: "r" }, "Earned So Far"),
                         React.createElement("th", { className: "r" }, "Net Payable"))),
                 React.createElement("tbody", null,
                     rows.map(({ e, c }) => [
@@ -1572,34 +1577,53 @@ function Salary({ db }) {
                             React.createElement("td", null,
                                 React.createElement("b", null, e.name),
                                 React.createElement("div", { className: "muted" }, e.id)),
-                            React.createElement("td", { className: "r" }, rs(c.base)),
+                            React.createElement("td", { className: "r" },
+                                rs(c.earnedBase),
+                                React.createElement("div", { className: "muted" },
+                                    c.doneDays,
+                                    " day",
+                                    c.doneDays === 1 ? "" : "s")),
                             React.createElement("td", { className: "r" }, c.absDed ? "− " + rs(c.absDed) : "—"),
                             React.createElement("td", { className: "r" }, c.lateDed ? "− " + rs(c.lateDed) : "—"),
                             React.createElement("td", { className: "r" }, c.leavePay ? "+ " + rs(c.leavePay) : c.inProgress ? React.createElement("span", { className: "muted" }, "Month end") : "—"),
                             React.createElement("td", { className: "r" }, c.otPay ? "+ " + rs(c.otPay) : "—"),
-                            React.createElement("td", { className: "r" }, rs(c.earned)),
                             React.createElement("td", { className: "r" },
                                 React.createElement("b", null, rs(c.payable)))),
                         open === e.id && React.createElement("tr", { key: e.id + "x" },
-                            React.createElement("td", { colSpan: 8 },
+                            React.createElement("td", { colSpan: 7 },
                                 React.createElement("div", { className: "breakdown" },
                                     React.createElement("div", null,
                                         React.createElement("span", null,
-                                            "Salary for ",
-                                            c.empDays === c.dim ? `all of ${monthName(month)}` : `${c.empDays} of ${c.dim} days in ${monthName(month)} (${niceDate(c.firstDay)} to ${niceDate(c.lastDay)})`,
-                                            c.inProgress ? ", if every remaining day is worked" : ""),
-                                        React.createElement("span", null, rs(c.base))),
-                                    React.createElement("div", null,
-                                        React.createElement("span", null, "Daily rate"),
+                                            "Monthly salary ",
+                                            rs(c.daily * c.dim),
+                                            ", daily rate"),
                                         React.createElement("span", null, rs(c.daily))),
+                                    React.createElement("div", null,
+                                        React.createElement("span", null,
+                                            "Salary for ",
+                                            c.doneDays,
+                                            " completed day",
+                                            c.doneDays === 1 ? "" : "s",
+                                            " (days off included)"),
+                                        React.createElement("span", null, rs(c.earnedBase))),
                                     c.untracked > 0 && React.createElement("div", null,
                                         React.createElement("span", null,
-                                            "Paid in full before attendance tracking started (",
-                                            longDate(TRACK_START),
-                                            "): ",
+                                            "Not included: ",
                                             c.untracked,
-                                            " days"),
-                                        React.createElement("span", null, "Rs 0")),
+                                            " day",
+                                            c.untracked === 1 ? "" : "s",
+                                            " before attendance tracking started (",
+                                            longDate(TRACK_START),
+                                            ")"),
+                                        React.createElement("span", null, "\u2014")),
+                                    c.remaining > 0 && React.createElement("div", null,
+                                        React.createElement("span", null,
+                                            "Not yet counted: ",
+                                            c.remaining,
+                                            " remaining day",
+                                            c.remaining === 1 ? "" : "s",
+                                            " this month, added as they are completed"),
+                                        React.createElement("span", null, "\u2014")),
                                     React.createElement("div", null,
                                         React.createElement("span", null, "Days present"),
                                         React.createElement("span", null, c.present)),
@@ -1637,19 +1661,12 @@ function Salary({ db }) {
                                         React.createElement("span", null, c.otPay ? "+ " + rs(c.otPay) : "Rs 0")),
                                     React.createElement("div", { className: "pay" },
                                         React.createElement("span", null,
-                                            "Earned so far (",
-                                            c.inProgress ? "completed days up to now" : "whole month",
-                                            ")"),
-                                        React.createElement("span", null, rs(c.earned))),
-                                    React.createElement("div", { className: "pay", style: { borderTop: 0, marginTop: 0 } },
-                                        React.createElement("span", null,
                                             "Net payable",
-                                            c.inProgress ? " for the whole month, if every remaining day is worked" : ""),
+                                            c.inProgress ? " so far" : ""),
                                         React.createElement("span", null, rs(c.payable)))))),
                     ]),
                     React.createElement("tr", { className: "total" },
                         React.createElement("td", { colSpan: 6 }, "Total"),
-                        React.createElement("td", { className: "r" }, rs(rows.reduce((t, r) => t + r.c.earned, 0))),
                         React.createElement("td", { className: "r" }, rs(total))))))));
 }
 function NetworkTab({ db, act }) {
@@ -1705,7 +1722,7 @@ function TrackingStart({ db, act }) {
     const [err, setErr] = useState("");
     return (React.createElement("div", { className: "panel" },
         React.createElement("h2", null, "Attendance Tracking Start"),
-        React.createElement("p", null, "Haazir checks attendance from this date. Working days before it are paid in full and never counted as absences, because attendance was not recorded in Haazir yet. Set it to the day your staff started checking in with Haazir."),
+        React.createElement("p", null, "Haazir records attendance and calculates payroll from this date. Days before it are not included in attendance or payroll. Set it to the day your staff start checking in with Haazir. Admins and super admins can change it; every change is recorded in the audit log."),
         React.createElement("div", { className: "row" },
             React.createElement("div", { className: "field", style: { width: 200 } },
                 React.createElement("label", null, "Start date"),
@@ -1754,7 +1771,6 @@ function Access({ db, act }) {
         act("/api/admins/reset", { username: a.username, password: pw }); };
     return (React.createElement(React.Fragment, null,
         React.createElement("h1", null, "Admins & Security"),
-        React.createElement(TrackingStart, { db: db, act: act }),
         React.createElement(EarlyRules, { db: db, act: act }),
         React.createElement("div", { className: "panel" },
             React.createElement("h2", null, "Check-In Verification"),

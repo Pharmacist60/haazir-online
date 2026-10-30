@@ -260,7 +260,7 @@ function dayKind(rec, s) {
 
 function calcSalary(e, ym, attendance, overtime) {
   const [y, m] = ym.split("-").map(Number); const dim = daysIn(y, m);
-  let base = 0, earnedBase = 0, lateDed = 0, lateCount = 0, lateMins = 0, otPay = 0, otHours = 0, present = 0, untracked = 0, halfDays = 0, shortDays = 0;
+  let base = 0, earnedBase = 0, doneDays = 0, remaining = 0, lateDed = 0, lateCount = 0, lateMins = 0, otPay = 0, otHours = 0, present = 0, untracked = 0, halfDays = 0, shortDays = 0;
   const missed = []; // days counted as absence: { ds, dp, units } (1 = full day, 0.5 = half day)
   let absentDays = 0;
   const lastS = settingsOn(e, `${ym}-${pad(dim)}`);
@@ -268,12 +268,13 @@ function calcSalary(e, ym, attendance, overtime) {
     const ds = `${ym}-${pad(d)}`;
     if (!employed(e, ds)) continue;
     const s = settingsOn(e, ds); if (!s) continue;
+    // Days before attendance tracking started are not part of Haazir's payroll.
+    if (ds < TRACK_START) { untracked++; continue; }
     const dp = s.salary / dim; base += dp;
     const rec = attendance.find(a => a.synced && a.empId === e.id && a.date === ds);
-    // "Earned so far" counts every day up to yesterday, plus today once today's check-out is done.
-    if (ds < TODAY || (ds === TODAY && rec && rec.out)) earnedBase += dp; else continue;
+    // Only completed days are paid: every day up to yesterday, plus today once today's check-out is done.
+    if (ds < TODAY || (ds === TODAY && rec && rec.out)) { earnedBase += dp; doneDays++; } else { remaining++; continue; }
     if (s.off.includes(weekday(ds))) continue;
-    if (!rec && ds < TRACK_START) { untracked++; continue; }
     if (!rec) { missed.push({ ds, dp, units: 1 }); absentDays++; continue; }
     present++;
     const k = dayKind(rec, s);
@@ -297,7 +298,7 @@ function calcSalary(e, ym, attendance, overtime) {
   const unusedLeaves = Math.max(0, leaves - usedUnits);
   const leavePay = inProgress ? 0 : unusedLeaves * daily;
   const earned = earnedBase - absDed - lateDed + otPay + leavePay;
-  return { base, earnedBase, earned, present, absences: absentDays, halfDays, shortDays, usedUnits, leaves, covered, unpaid: unpaidUnits, absDed, unusedLeaves, leavePay, lateCount, lateMins, lateDed, otHours, otPay, payable: base - absDed - lateDed + otPay + leavePay, inProgress, daily, empDays, dim, firstDay, lastDay, untracked };
+  return { base, earnedBase, earned, present, absences: absentDays, halfDays, shortDays, usedUnits, leaves, covered, unpaid: unpaidUnits, absDed, unusedLeaves, leavePay, lateCount, lateMins, lateDed, otHours, otPay, payable: earned, inProgress, daily, empDays, dim, firstDay, lastDay, untracked, doneDays, remaining };
 }
 
 function Copyright() {

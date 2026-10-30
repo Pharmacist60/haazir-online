@@ -292,6 +292,7 @@ function RecordsInner({ db, act }) {
   return (
     <>
       <h1>Attendance Records</h1>
+      <TrackingStart db={db} act={act} />
       <p className="sub">Add missing entries, edit wrong times, or delete entries made by mistake. Every change is recorded in the audit log with its reason. Night shifts appear under the date they began.</p>
       <div className="panel">
         <div className="row" style={{ marginBottom: 12 }}>
@@ -484,44 +485,44 @@ const r2 = n => Math.round(n * 100) / 100;
 
 function Salary({ db }) {
   const [month, setMonth] = useState(TODAY.slice(0, 7)); const [open, setOpen] = useState(null);
-  const rows = db.employees.map(e => ({ e, c: calcSalary(e, month, db.attendance, db.overtime) })).filter(r => r.c.base > 0);
+  const rows = db.employees.map(e => ({ e, c: calcSalary(e, month, db.attendance, db.overtime) })).filter(r => r.c.base > 0 || r.c.untracked > 0);
   const total = rows.reduce((t, r) => t + r.c.payable, 0);
   const inProgress = rows[0]?.c.inProgress;
   return (
     <>
       <h1>Payroll</h1>
-      <p className="sub">Daily rate is the monthly salary divided by the days in the month. Earned So Far covers the days completed up to now; Net Payable is the full month if every remaining day is worked. Leaving early beyond the early leave grace counts as a half day or an absence (see Admins & Security). Absences beyond the paid leaves and late minutes beyond the grace period are deducted. Paid leaves not taken are paid extra at the daily rate when the month ends, and approved overtime is added. Select an employee to view the full calculation.</p>
+      <p className="sub">Daily rate is the monthly salary divided by the days in the month. Payroll counts only completed days: every day up to yesterday, plus today once the employee has checked out. Remaining days of the month are added as they are completed. Days before the attendance tracking start date are not included. Leaving early beyond the early leave grace counts as a half day or an absence (see Admins & Security). Absences beyond the paid leaves and late minutes beyond the grace period are deducted. Paid leaves not taken are paid extra at the daily rate when the month ends, and approved overtime is added. Select an employee to view the full calculation.</p>
       <div className="printhead">Haazir, eco Pharmacy: Payroll for {monthName(month)}{inProgress ? " (in progress, calculated to yesterday)" : ""}. Printed {longDate(TODAY)}.</div>
       <div className="row" style={{ marginBottom: 14, alignItems: "center" }}><MonthPick value={month} onChange={v => { setMonth(v); setOpen(null); }} />
-        {inProgress && <span className="tag amber">In Progress: Deductions to Yesterday</span>}
+        {inProgress && <span className="tag amber">In Progress: Completed Days Only</span>}
         <ExportButtons onExcel={() => saveBlob(makeXlsx("Payroll " + month, [
-          ["Employee ID", "Name", "Month", "Salary for Month", "Daily Rate", "Days Present", "Absences", "Half Days", "Short Days", "Leave Days Covered", "Unpaid Days", "Absence Deduction", "Times Late", "Minutes Late (beyond grace)", "Late Deduction", "Unused Paid Leaves", "Unused Leave Pay", "Approved Overtime (hrs)", "Overtime Pay", "Earned So Far", "Net Payable"],
-          ...rows.map(({ e, c }) => [e.id, e.name, monthName(month), r2(c.base), r2(c.daily), c.present, c.absences, c.halfDays, c.shortDays, c.covered, c.unpaid, r2(c.absDed), c.lateCount, c.lateMins, r2(c.lateDed), c.inProgress ? "At month end" : c.unusedLeaves, r2(c.leavePay), c.otHours, r2(c.otPay), r2(c.earned), r2(c.payable)]),
-          ["", "Total", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", r2(rows.reduce((t, r) => t + r.c.earned, 0)), r2(total)],
+          ["Employee ID", "Name", "Month", "Days Counted", "Salary for Days Counted", "Daily Rate", "Days Present", "Absences", "Half Days", "Short Days", "Leave Days Covered", "Unpaid Days", "Absence Deduction", "Times Late", "Minutes Late (beyond grace)", "Late Deduction", "Unused Paid Leaves", "Unused Leave Pay", "Approved Overtime (hrs)", "Overtime Pay", "Net Payable"],
+          ...rows.map(({ e, c }) => [e.id, e.name, monthName(month), c.doneDays, r2(c.earnedBase), r2(c.daily), c.present, c.absences, c.halfDays, c.shortDays, c.covered, c.unpaid, r2(c.absDed), c.lateCount, c.lateMins, r2(c.lateDed), c.inProgress ? "At month end" : c.unusedLeaves, r2(c.leavePay), c.otHours, r2(c.otPay), r2(c.payable)]),
+          ["", "Total", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", r2(total)],
         ]), `Haazir Payroll ${month}.xlsx`)} />
       </div>
       <div className="panel">
-        <table className="t"><thead><tr><th>Employee</th><th className="r">Salary</th><th className="r">Absences</th><th className="r">Late</th><th className="r">Unused Leave</th><th className="r">Overtime</th><th className="r">Earned So Far</th><th className="r">Net Payable</th></tr></thead>
+        <table className="t"><thead><tr><th>Employee</th><th className="r">Salary Earned</th><th className="r">Absences</th><th className="r">Late</th><th className="r">Unused Leave</th><th className="r">Overtime</th><th className="r">Net Payable</th></tr></thead>
           <tbody>{rows.map(({ e, c }) => [
             <tr key={e.id} className="click" onClick={() => setOpen(open === e.id ? null : e.id)}>
-              <td><b>{e.name}</b><div className="muted">{e.id}</div></td><td className="r">{rs(c.base)}</td>
+              <td><b>{e.name}</b><div className="muted">{e.id}</div></td><td className="r">{rs(c.earnedBase)}<div className="muted">{c.doneDays} day{c.doneDays === 1 ? "" : "s"}</div></td>
               <td className="r">{c.absDed ? "− " + rs(c.absDed) : "—"}</td><td className="r">{c.lateDed ? "− " + rs(c.lateDed) : "—"}</td>
               <td className="r">{c.leavePay ? "+ " + rs(c.leavePay) : c.inProgress ? <span className="muted">Month end</span> : "—"}</td>
-              <td className="r">{c.otPay ? "+ " + rs(c.otPay) : "—"}</td><td className="r">{rs(c.earned)}</td><td className="r"><b>{rs(c.payable)}</b></td></tr>,
-            open === e.id && <tr key={e.id + "x"}><td colSpan={8}><div className="breakdown">
-              <div><span>Salary for {c.empDays === c.dim ? `all of ${monthName(month)}` : `${c.empDays} of ${c.dim} days in ${monthName(month)} (${niceDate(c.firstDay)} to ${niceDate(c.lastDay)})`}{c.inProgress ? ", if every remaining day is worked" : ""}</span><span>{rs(c.base)}</span></div>
-              <div><span>Daily rate</span><span>{rs(c.daily)}</span></div>
-              {c.untracked > 0 && <div><span>Paid in full before attendance tracking started ({longDate(TRACK_START)}): {c.untracked} days</span><span>Rs 0</span></div>}
+              <td className="r">{c.otPay ? "+ " + rs(c.otPay) : "—"}</td><td className="r"><b>{rs(c.payable)}</b></td></tr>,
+            open === e.id && <tr key={e.id + "x"}><td colSpan={7}><div className="breakdown">
+              <div><span>Monthly salary {rs(c.daily * c.dim)}, daily rate</span><span>{rs(c.daily)}</span></div>
+              <div><span>Salary for {c.doneDays} completed day{c.doneDays === 1 ? "" : "s"} (days off included)</span><span>{rs(c.earnedBase)}</span></div>
+              {c.untracked > 0 && <div><span>Not included: {c.untracked} day{c.untracked === 1 ? "" : "s"} before attendance tracking started ({longDate(TRACK_START)})</span><span>—</span></div>}
+              {c.remaining > 0 && <div><span>Not yet counted: {c.remaining} remaining day{c.remaining === 1 ? "" : "s"} this month, added as they are completed</span><span>—</span></div>}
               <div><span>Days present</span><span>{c.present}</span></div>
               <div><span>Absences: {c.absences}{c.halfDays ? `, half days: ${c.halfDays}` : ""}{c.shortDays ? `, short days (counted as absent): ${c.shortDays}` : ""}. Paid leave used: {c.covered} of {c.leaves}; unpaid: {c.unpaid} day{c.unpaid === 1 ? "" : "s"}</span><span>{c.absDed ? "− " + rs(c.absDed) : "Rs 0"}</span></div>
               <div><span>{c.inProgress ? `Unused paid leaves: calculated when the month ends (${Math.max(0, c.leaves - c.usedUnits)} unused so far)` : `Unused paid leaves: ${c.unusedLeaves} × daily rate`}</span><span>{c.leavePay ? "+ " + rs(c.leavePay) : "Rs 0"}</span></div>
               <div><span>Late {c.lateCount} times, {c.lateMins} min beyond grace</span><span>{c.lateDed ? "− " + rs(c.lateDed) : "Rs 0"}</span></div>
               <div><span>Approved overtime: {c.otHours} hrs</span><span>{c.otPay ? "+ " + rs(c.otPay) : "Rs 0"}</span></div>
-              <div className="pay"><span>Earned so far ({c.inProgress ? "completed days up to now" : "whole month"})</span><span>{rs(c.earned)}</span></div>
-              <div className="pay" style={{ borderTop: 0, marginTop: 0 }}><span>Net payable{c.inProgress ? " for the whole month, if every remaining day is worked" : ""}</span><span>{rs(c.payable)}</span></div>
+              <div className="pay"><span>Net payable{c.inProgress ? " so far" : ""}</span><span>{rs(c.payable)}</span></div>
             </div></td></tr>,
           ])}
-            <tr className="total"><td colSpan={6}>Total</td><td className="r">{rs(rows.reduce((t, r) => t + r.c.earned, 0))}</td><td className="r">{rs(total)}</td></tr></tbody></table>
+            <tr className="total"><td colSpan={6}>Total</td><td className="r">{rs(total)}</td></tr></tbody></table>
       </div>
     </>
   );
@@ -575,7 +576,7 @@ function TrackingStart({ db, act }) {
   return (
     <div className="panel">
       <h2>Attendance Tracking Start</h2>
-      <p>Haazir checks attendance from this date. Working days before it are paid in full and never counted as absences, because attendance was not recorded in Haazir yet. Set it to the day your staff started checking in with Haazir.</p>
+      <p>Haazir records attendance and calculates payroll from this date. Days before it are not included in attendance or payroll. Set it to the day your staff start checking in with Haazir. Admins and super admins can change it; every change is recorded in the audit log.</p>
       <div className="row">
         <div className="field" style={{ width: 200 }}><label>Start date</label><input type="date" value={d} max={TODAY} onChange={e => setD(e.target.value)} /></div>
         <button className="btn primary" disabled={d === db.trackingStart} onClick={() => act("/api/settings/tracking", { date: d }, setErr)}>Save Date</button>
@@ -615,7 +616,6 @@ function Access({ db, act }) {
   return (
     <>
       <h1>Admins & Security</h1>
-      <TrackingStart db={db} act={act} />
       <EarlyRules db={db} act={act} />
       <div className="panel">
         <h2>Check-In Verification</h2>
