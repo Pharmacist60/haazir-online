@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.8.0";
+const APP_VERSION = "1.9.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],

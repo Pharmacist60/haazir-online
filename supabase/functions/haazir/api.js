@@ -5,7 +5,7 @@ import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
 import * as L from './logic.js';
 
-export const VERSION = '1.8.0';
+export const VERSION = '1.9.0';
 
 /* ---------------- database layout ---------------- */
 // Every table, with its columns. Used to create the database, and to back up and restore it.
@@ -503,10 +503,23 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   route('POST', '/api/networks/add', async ({ req, body: b }) => {
     const a = await requireAdmin(req, true);
     const raw = clientIP(req); need(raw, 'Your internet address could not be detected.');
-    const ip = networkKey(raw), name = String(b.name || '').trim() || 'Pharmacy internet';
+    // "range" matches every address in the same block (e.g. 151.123.155.x), for providers that change the last part.
+    const ip = b.range !== false && /^\d+\.\d+\.\d+\.\d+$/.test(raw) ? raw.split('.').slice(0, 3).join('.') + '.' : networkKey(raw);
+    const name = String(b.name || '').trim() || 'Pharmacy internet';
     need(!(await one('SELECT 1 AS x FROM networks WHERE ip = ?', ip)), 'This connection is already registered.', 409);
     await run('INSERT INTO networks (name, ip) VALUES (?, ?)', name, ip);
     await audit(adminLabel(a), `Set "${name}" (${ip}) as a pharmacy network`);
+    return { ok: true };
+  });
+  // Turns an exact address into its range (e.g. 151.123.155.122 → 151.123.155.x).
+  route('POST', '/api/networks/widen', async ({ req, body: b }) => {
+    const a = await requireAdmin(req, true);
+    const n = await one('SELECT * FROM networks WHERE id = ?', Number(b.id)); need(n, 'Network not found.', 404);
+    need(/^\d+\.\d+\.\d+\.\d+$/.test(n.ip), 'This network already covers a range.');
+    const range = n.ip.split('.').slice(0, 3).join('.') + '.';
+    if (await one('SELECT 1 AS x FROM networks WHERE ip = ?', range)) await run('DELETE FROM networks WHERE id = ?', n.id);
+    else await run('UPDATE networks SET ip = ? WHERE id = ?', range, n.id);
+    await audit(adminLabel(a), `Changed "${n.name}" from ${n.ip} to the range ${range}x`);
     return { ok: true };
   });
   route('POST', '/api/networks/remove', async ({ req, body: b }) => {

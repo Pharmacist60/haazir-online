@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.8.0";
+const APP_VERSION = "1.9.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -1671,9 +1671,13 @@ function Salary({ db }) {
 }
 function NetworkTab({ db, act }) {
     const [name, setName] = useState("");
+    const [range, setRange] = useState(true);
     const recognised = db.atShop;
-    const setNet = async () => { if (await act("/api/networks/add", { name }))
+    const v4 = /^\d+\.\d+\.\d+\.\d+$/.test(db.shopIP || "");
+    const rangeText = v4 ? db.shopIP.split(".").slice(0, 3).join(".") + ".x" : "";
+    const setNet = async () => { if (await act("/api/networks/add", { name, range }))
         setName(""); };
+    const shown = ip => ip.endsWith(".") ? ip + "x (address range)" : ip.endsWith(":") ? ip + "… (IPv6 network)" : ip + " (exact address)";
     const remove = n => { if (confirm(`Remove "${n.name}"? Staff on that connection will no longer be able to check in.`))
         act("/api/networks/remove", { id: n.id }); };
     return (React.createElement(React.Fragment, null,
@@ -1691,7 +1695,15 @@ function NetworkTab({ db, act }) {
                 React.createElement("div", { className: "field", style: { flex: 1, minWidth: 200 } },
                     React.createElement("label", null, "Connection name"),
                     React.createElement("input", { placeholder: "e.g. Nayatel Fiber", value: name, onChange: e => setName(e.target.value) })),
-                React.createElement("button", { className: "btn primary", onClick: setNet, disabled: recognised }, "Set as Pharmacy Network"))),
+                React.createElement("button", { className: "btn primary", onClick: setNet, disabled: recognised }, "Set as Pharmacy Network")),
+            v4 && !recognised && React.createElement("label", { className: "radio on", style: { marginTop: 12, marginBottom: 0 } },
+                React.createElement("input", { type: "checkbox", checked: range, onChange: () => setRange(!range) }),
+                React.createElement("span", null,
+                    React.createElement("b", null,
+                        "Recognise the whole range ",
+                        rangeText),
+                    React.createElement("br", null),
+                    React.createElement("span", { className: "muted" }, "Recommended. Internet providers often change the last part of the address. Keeping this on stops staff being asked for the counter code when that happens.")))),
         React.createElement("div", { className: "panel" },
             React.createElement("h2", null, "Counter Code"),
             React.createElement("p", null, "When a phone is not on the pharmacy Wi-Fi, for example during an internet outage, staff check in with a 6-digit code that changes every 30 seconds. Show it on a spare phone or tablet kept plugged in at the counter."),
@@ -1713,9 +1725,11 @@ function NetworkTab({ db, act }) {
                     React.createElement("tbody", null, db.networks.map(n => React.createElement("tr", { key: n.id },
                         React.createElement("td", null,
                             React.createElement("b", null, n.name)),
-                        React.createElement("td", { className: "num" }, n.ip.endsWith(".") ? n.ip + "x (local network)" : n.ip.endsWith(":") ? n.ip + "… (IPv6 network)" : n.ip),
+                        React.createElement("td", { className: "num" }, shown(n.ip)),
                         React.createElement("td", { className: "r" },
-                            React.createElement("button", { className: "btn small danger", onClick: () => remove(n) }, "Remove")))))))));
+                            React.createElement("div", { className: "row", style: { justifyContent: "flex-end" } },
+                                /^\d+\.\d+\.\d+\.\d+$/.test(n.ip) && React.createElement("button", { className: "btn small", onClick: () => act("/api/networks/widen", { id: n.id }) }, "Use Whole Range"),
+                                React.createElement("button", { className: "btn small danger", onClick: () => remove(n) }, "Remove"))))))))));
 }
 function TrackingStart({ db, act }) {
     const [d, setD] = useState(db.trackingStart || TODAY);

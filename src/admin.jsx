@@ -529,9 +529,12 @@ function Salary({ db }) {
 }
 
 function NetworkTab({ db, act }) {
-  const [name, setName] = useState("");
+  const [name, setName] = useState(""); const [range, setRange] = useState(true);
   const recognised = db.atShop;
-  const setNet = async () => { if (await act("/api/networks/add", { name })) setName(""); };
+  const v4 = /^\d+\.\d+\.\d+\.\d+$/.test(db.shopIP || "");
+  const rangeText = v4 ? db.shopIP.split(".").slice(0, 3).join(".") + ".x" : "";
+  const setNet = async () => { if (await act("/api/networks/add", { name, range })) setName(""); };
+  const shown = ip => ip.endsWith(".") ? ip + "x (address range)" : ip.endsWith(":") ? ip + "… (IPv6 network)" : ip + " (exact address)";
   const remove = n => { if (confirm(`Remove "${n.name}"? Staff on that connection will no longer be able to check in.`)) act("/api/networks/remove", { id: n.id }); };
   return (
     <>
@@ -548,6 +551,9 @@ function NetworkTab({ db, act }) {
           <div className="field" style={{ flex: 1, minWidth: 200 }}><label>Connection name</label><input placeholder="e.g. Nayatel Fiber" value={name} onChange={e => setName(e.target.value)} /></div>
           <button className="btn primary" onClick={setNet} disabled={recognised}>Set as Pharmacy Network</button>
         </div>
+        {v4 && !recognised && <label className="radio on" style={{ marginTop: 12, marginBottom: 0 }}>
+          <input type="checkbox" checked={range} onChange={() => setRange(!range)} />
+          <span><b>Recognise the whole range {rangeText}</b><br /><span className="muted">Recommended. Internet providers often change the last part of the address. Keeping this on stops staff being asked for the counter code when that happens.</span></span></label>}
       </div>
       <div className="panel">
         <h2>Counter Code</h2>
@@ -565,7 +571,9 @@ function NetworkTab({ db, act }) {
       <div className="panel">
         <h2>Registered Networks</h2>
         {db.networks.length === 0 ? <p className="muted">No networks registered yet. Staff cannot check in until one is added.</p> :
-          <table className="t"><tbody>{db.networks.map(n => <tr key={n.id}><td><b>{n.name}</b></td><td className="num">{n.ip.endsWith(".") ? n.ip + "x (local network)" : n.ip.endsWith(":") ? n.ip + "… (IPv6 network)" : n.ip}</td><td className="r"><button className="btn small danger" onClick={() => remove(n)}>Remove</button></td></tr>)}</tbody></table>}
+          <table className="t"><tbody>{db.networks.map(n => <tr key={n.id}><td><b>{n.name}</b></td><td className="num">{shown(n.ip)}</td><td className="r"><div className="row" style={{ justifyContent: "flex-end" }}>
+            {/^\d+\.\d+\.\d+\.\d+$/.test(n.ip) && <button className="btn small" onClick={() => act("/api/networks/widen", { id: n.id })}>Use Whole Range</button>}
+            <button className="btn small danger" onClick={() => remove(n)}>Remove</button></div></td></tr>)}</tbody></table>}
       </div>
     </>
   );
