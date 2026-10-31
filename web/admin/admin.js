@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.14.0";
+const APP_VERSION = "2.0.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -264,7 +264,10 @@ const pad = n => String(n).padStart(2, "0");
 const dstr = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const toMin = t => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
 const fromMin = m => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
-const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+// Haazir always uses Pakistan time, whatever the phone's own time zone.
+const PK = (o) => Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Karachi", hourCycle: "h23", ...o }).formatToParts(new Date()).map(p => [p.type, p.value]));
+const nowTime = () => { const p = PK({ hour: "2-digit", minute: "2-digit" }); return `${p.hour === "24" ? "00" : p.hour}:${p.minute}`; };
+const pkToday = () => { const p = PK({ year: "numeric", month: "2-digit", day: "2-digit" }); return `${p.year}-${p.month}-${p.day}`; };
 let TODAY = dstr(new Date());
 const fmt = t => { if (!t)
     return "—"; let [h, m] = t.split(":").map(Number); const ap = h >= 12 ? "PM" : "AM"; h = h % 12 || 12; return `${h}:${pad(m)} ${ap}`; };
@@ -486,6 +489,13 @@ async function saveBlob(blob, name) {
     setTimeout(() => URL.revokeObjectURL(url), 5000);
     return true;
 }
+/* ---------- base64url, passkeys, browser push ---------- */
+const b64uToBytes = s => { s = String(s).replace(/-/g, "+").replace(/_/g, "/"); const b = atob(s + "===".slice((s.length + 3) % 4)); return Uint8Array.from(b, c => c.charCodeAt(0)); };
+const bytesToB64u = buf => { let bin = ""; new Uint8Array(buf).forEach(x => { bin += String.fromCharCode(x); }); return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
+const passkeysSupported = () => !inAndroidApp() && window.isSecureContext && !!window.PublicKeyCredential;
+const webPushSupported = () => !inAndroidApp() && window.isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const isIos = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
 /* ---------- Excel files (.xlsx) ---------- */
 const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) {
     let c = n;
@@ -2055,6 +2065,56 @@ function Popups({ notif }) {
         React.createElement("div", { className: "ptext" }, e.text),
         React.createElement("small", null, e.at)))));
 }
+// Notifications on this browser or iPhone, even when Haazir is closed (Web Push).
+function WebPushRow({ setMsg }) {
+    const [on, setOn] = useState(!!localStorage.getItem("hz_webpush"));
+    const [busy, setBusy] = useState(false);
+    const turnOn = async () => {
+        setBusy(true);
+        setMsg("");
+        try {
+            const perm = await Notification.requestPermission();
+            if (perm !== "granted")
+                throw new Error("Notifications are blocked for Haazir in this browser. Allow them in the browser's site settings, then try again.");
+            const reg = await navigator.serviceWorker.register("sw.js");
+            await navigator.serviceWorker.ready;
+            const { publicKey } = await api("/api/push/vapid");
+            const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBytes(publicKey) });
+            const j = sub.toJSON();
+            await api("/api/push/web/register", { endpoint: j.endpoint, keys: j.keys });
+            localStorage.setItem("hz_webpush", j.endpoint);
+            setOn(true);
+        }
+        catch (e) {
+            setMsg(e.message || "Notifications could not be turned on in this browser.");
+        }
+        setBusy(false);
+    };
+    const turnOff = async () => {
+        setBusy(true);
+        try {
+            const reg = await navigator.serviceWorker.getRegistration("sw.js");
+            const sub = reg && await reg.pushManager.getSubscription();
+            const ep = (sub && sub.endpoint) || localStorage.getItem("hz_webpush");
+            if (sub)
+                await sub.unsubscribe();
+            if (ep)
+                await api("/api/push/web/unregister", { endpoint: ep });
+        }
+        catch { /* ignore */ }
+        localStorage.removeItem("hz_webpush");
+        setOn(false);
+        setBusy(false);
+    };
+    const text = !webPushSupported() ? (isIos() && !isStandalone() ? "On iPhone: open Haazir in Safari, tap Share → Add to Home Screen, open Haazir from the home screen, then turn this on." : "This browser cannot receive notifications when Haazir is closed.")
+        : isIos() && !isStandalone() ? "On iPhone: tap Share → Add to Home Screen, open Haazir from the home screen, then turn this on."
+            : on ? "On: notifications arrive on this device even when Haazir is closed. The choices above apply." : "Get notifications on this device even when Haazir is closed.";
+    return (React.createElement("div", { className: "switchrow", style: { cursor: "default" } },
+        React.createElement("span", null,
+            React.createElement("b", null, "Notifications on This Device"),
+            React.createElement("small", null, text)),
+        webPushSupported() && !(isIos() && !isStandalone()) && (on ? React.createElement("button", { className: "btn small", disabled: busy, onClick: turnOff }, "Turn Off") : React.createElement("button", { className: "btn small primary", disabled: busy, onClick: turnOn }, "Turn On"))));
+}
 function NotifySettings({ db, act, notif }) {
     const [p, setP] = useState({ ...db.me.notify });
     const [msg, setMsg] = useState("");
@@ -2091,16 +2151,13 @@ function NotifySettings({ db, act, notif }) {
                     React.createElement("b", null, "Notification Tone"),
                     React.createElement("small", null, "Play a short tone when a new notification arrives.")),
                 React.createElement("input", { type: "checkbox", className: "switch", checked: p.sound !== false, onChange: () => setP({ ...p, sound: p.sound === false }) })),
-            React.createElement("label", { className: "switchrow" },
-                React.createElement("span", null,
-                    React.createElement("b", null, "Device Notifications"),
-                    React.createElement("small", null, "Also show notifications on this device while Haazir is open in the background.")),
-                React.createElement("input", { type: "checkbox", className: "switch", checked: !!p.device, onChange: toggleDevice })),
-            React.createElement("div", { className: "switchrow", style: { cursor: "default" } },
+            !inAndroidApp() && React.createElement(WebPushRow, { setMsg: setMsg }),
+            inAndroidApp() && React.createElement("div", { className: "switchrow", style: { cursor: "default" } },
                 React.createElement("span", null,
                     React.createElement("b", null, "Phone Notifications"),
-                    React.createElement("small", null, !db.push || !db.push.configured ? "Not set up yet. A super admin sets them up under Admins & Security." : db.push.myDevices ? `On for ${db.push.myDevices} phone${db.push.myDevices === 1 ? "" : "s"}. They arrive even when Haazir is closed, with the Haazir tone. The choices above apply.` : "Open the Admin Dashboard in the Haazir Android app and allow notifications when asked.")),
-                db.push && db.push.configured && db.push.myDevices > 0 && React.createElement("button", { className: "btn small", onClick: () => act("/api/push/test", {}, setMsg) }, "Send Test")),
+                    React.createElement("small", null, !db.push || !db.push.configured ? "Not set up yet. A super admin sets them up under Admins & Security." : db.push.myDevices ? `On for ${db.push.myDevices} phone${db.push.myDevices === 1 ? "" : "s"}. They arrive even when Haazir is closed, with the Haazir tone. The choices above apply.` : "Open the Admin Dashboard in the Haazir Android app and allow notifications when asked."))),
+            db.push && (db.push.myDevices > 0 || db.push.myBrowsers > 0) && React.createElement("div", { className: "row", style: { marginTop: 10 } },
+                React.createElement("button", { className: "btn small", onClick: () => act("/api/push/test", {}, setMsg) }, "Send Test Notification")),
             msg && React.createElement("div", { className: "notice", style: { marginTop: 10 } }, msg),
             React.createElement("div", { className: "row", style: { marginTop: 16, justifyContent: "flex-end" } },
                 React.createElement("button", { className: "btn", onClick: notif.closeSettings }, "Cancel"),
@@ -2451,15 +2508,18 @@ function AdminApp() {
         }
     };
     const signOut = async () => {
-        const fcm = localStorage.getItem("hz_fcm");
+        const fcm = localStorage.getItem("hz_fcm"), wp = localStorage.getItem("hz_webpush");
         try {
             if (fcm)
                 await api("/api/push/unregister", { token: fcm });
+            if (wp)
+                await api("/api/push/web/unregister", { endpoint: wp });
             await api("/api/logout", {});
         }
         catch { /* ignore */ }
         localStorage.removeItem("hz_token");
         localStorage.removeItem("hz_fcm");
+        localStorage.removeItem("hz_webpush");
         setDb(null);
         setPhase("login");
     };

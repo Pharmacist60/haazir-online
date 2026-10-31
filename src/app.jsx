@@ -159,10 +159,64 @@ function LateForm({ st, onClose, reload }) {
   );
 }
 
-function Home({ st, reload }) {
+/* ---------- check-ins saved offline ---------- */
+const queueGet = () => { try { return JSON.parse(localStorage.getItem("hz_queue") || "[]"); } catch { return []; } };
+const queueSet = q => localStorage.setItem("hz_queue", JSON.stringify(q));
+// Uploads saved check-ins. Each carries the counter code shown at that moment, which the server checks against the time.
+async function syncQueue() {
+  const q = queueGet(); if (!q.length) return { done: [], failed: [] };
+  const r = await api("/api/punch/offline", { items: q });
+  const done = [], failed = [];
+  queueSet(q.filter(it => {
+    const res = r.results.find(x => x.id === it.id);
+    if (!res) return true;
+    if (res.ok) { done.push(res); return false; }
+    if (res.final) { failed.push({ ...it, error: res.error }); return false; }
+    return true;
+  }));
+  return { done, failed };
+}
+
+/* ---------- passkeys (fingerprint / Face ID in the browser) ---------- */
+async function passkeyCreate(emp) {
+  const { challenge } = await api("/api/passkey/challenge");
+  const cred = await navigator.credentials.create({ publicKey: {
+    challenge: new TextEncoder().encode(challenge), rp: { name: "Haazir", id: location.hostname },
+    user: { id: new TextEncoder().encode(emp.id), name: emp.id, displayName: emp.name },
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+    authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" },
+    timeout: 60000, attestation: "none" } });
+  await api("/api/passkey/register", { id: cred.id, clientDataJSON: bytesToB64u(cred.response.clientDataJSON), attestationObject: bytesToB64u(cred.response.attestationObject) });
+}
+async function passkeyGet(id) {
+  const { challenge } = await api("/api/passkey/challenge");
+  const a = await navigator.credentials.get({ publicKey: { challenge: new TextEncoder().encode(challenge), rpId: location.hostname, allowCredentials: [{ type: "public-key", id: b64uToBytes(id) }], userVerification: "required", timeout: 60000 } });
+  return { id: a.id, clientDataJSON: bytesToB64u(a.response.clientDataJSON), authenticatorData: bytesToB64u(a.response.authenticatorData), signature: bytesToB64u(a.response.signature) };
+}
+
+function PasskeySetup({ st, reload }) {
+  const [hide, setHide] = useState(!!localStorage.getItem("hz_pk_later")); const [err, setErr] = useState(""); const [busy, setBusy] = useState(false);
+  if (hide || !passkeysSupported() || st.passkeyId || st.offline) return null;
+  const setup = async () => {
+    setBusy(true); setErr("");
+    try { await passkeyCreate(st.employee); await reload(); }
+    catch (e) { setErr(e.name === "NotAllowedError" ? "Setup was cancelled or not confirmed. Please try again." : e.message || "Fingerprint / Face ID could not be set up on this phone."); }
+    setBusy(false);
+  };
+  return (
+    <div className="sheet" style={{ textAlign: "left", alignItems: "stretch" }}>
+      <div className="row" style={{ alignItems: "center", flexWrap: "nowrap" }}><Fingerprint size={30} color="#007A1F" /><div><b>Use Fingerprint or Face ID</b><div className="muted" style={{ fontSize: 13 }}>Confirm check-ins with your phone's fingerprint or Face ID.</div></div></div>
+      {err && <div className="err" style={{ marginTop: 0 }}>{err}</div>}
+      <div className="row"><button className="btn primary" style={{ flex: 1 }} disabled={busy} onClick={setup}>Set Up</button><button className="btn" onClick={() => { localStorage.setItem("hz_pk_later", "1"); setHide(true); }}>Not Now</button></div>
+    </div>
+  );
+}
+
+function Home({ st, reload, addLocal }) {
   const emp = st.employee;
   const [step, setStep] = useState(null); const [msg, setMsg] = useState(""); const [done, setDone] = useState(null); const [busy, setBusy] = useState(false);
-  const [code, setCode] = useState(""); const [bioState, setBioState] = useState(null);
+  const [code, setCode] = useState(""); const [bioState, setBioState] = useState(null); const [wa, setWa] = useState(null);
+  const queued = queueGet().length;
   const nowM = toMin(st.now);
   const open = openRecordClient(emp, st.attendance, nowM);
   const shiftDate = open ? open.date : pickShiftDate(emp, nowM);
@@ -176,14 +230,32 @@ function Home({ st, reload }) {
 
   // Check-in flow: location (pharmacy Wi-Fi or counter code), then fingerprint and/or PIN.
   const start = async () => {
-    setMsg(""); setDone(null); setCode(""); setBioState(null);
+    setMsg(""); setDone(null); setCode(""); setBioState(null); setWa(null);
     const fresh = await reload();
-    if (fresh && !fresh.atShop) { setStep("code"); return; }
+    if (!fresh) { setMsg("No internet connection. Enter the counter code, and your check-in will be saved on this phone and uploaded later."); setStep("code"); return; }
+    if (!fresh.atShop) { setStep("code"); return; }
     verify("");
   };
   const verify = async c => {
     setMsg("");
-    if (!inAndroidApp()) { setStep("pin"); return; }
+    if (!inAndroidApp()) {
+      // In a phone browser: fingerprint / Face ID through a passkey, when one is set up and the phone is online.
+      if (passkeysSupported() && st.passkeyId && !st.offline) {
+        setStep("bio");
+        try {
+          const a = await passkeyGet(st.passkeyId); setWa(a); setBioState("ok");
+          if (st.mode === "either") return submit({ webauthn: a, code: c });
+          setStep("pin"); return;
+        } catch (e) {
+          if (e.name === "NotAllowedError") {
+            if (st.mode === "either") { setMsg("Fingerprint / Face ID was not confirmed. Please enter your PIN instead."); setStep("pin"); return; }
+            setStep(null); setMsg("Fingerprint / Face ID was not confirmed. Please try again."); return;
+          }
+          setBioState("unavailable"); setStep("pin"); return;
+        }
+      }
+      setStep("pin"); return;
+    }
     setStep("bio");
     const [status] = await askApp({ type: "bio", reason: action === "out" ? "Confirm your check-out" : "Confirm your check-in" }, "hzAppBio");
     if (status === "ok") { setBioState("ok"); if (st.mode === "either") return submit({ bio: true, code: c }); setStep("pin"); return; }
@@ -195,7 +267,16 @@ function Home({ st, reload }) {
   const submit = async body => {
     setBusy(true);
     try { const r = await api("/api/punch", { code, ...body }); setStep(null); setDone(r); await reload(); }
-    catch (e) { setMsg(e.message); if (e.status === 403) setStep(null); }
+    catch (e) {
+      if (e.status === 0) {
+        // No internet: keep the check-in on this phone with the counter code, and upload it later.
+        if (!code) { setMsg("No internet connection. Enter the counter code shown at the pharmacy counter, so your check-in can be saved on this phone."); setStep("code"); setBusy(false); return; }
+        const t = nowTime();
+        queueSet([...queueGet(), { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 10), at: Date.now(), code, pin: body.pin, bio: body.bio === true, bioUnavailable: body.bioUnavailable === true || (!inAndroidApp() && !!body.pin) }]);
+        addLocal(action, shiftDate, t, rec);
+        setStep(null); setDone({ action, time: t, offline: true });
+      } else { setMsg(e.message); if (e.status === 403) setStep(null); }
+    }
     setBusy(false);
   };
   // The Android app's Back button closes an open form first.
@@ -203,7 +284,7 @@ function Home({ st, reload }) {
     window.hzBack = () => { if (step && step !== "bio") { setStep(null); setMsg(""); return true; } if (done || msg) { setDone(null); setMsg(""); return true; } return false; };
     return () => { delete window.hzBack; };
   }, [step, done, msg]);
-  const submitPin = pin => submit({ pin, code, bio: bioState === "ok", bioUnavailable: bioState === "unavailable" });
+  const submitPin = pin => submit({ pin, code, bio: bioState === "ok" && inAndroidApp(), webauthn: inAndroidApp() ? undefined : wa || undefined, bioUnavailable: bioState === "unavailable" });
 
   return (
     <>
@@ -235,10 +316,13 @@ function Home({ st, reload }) {
           {done && (
             <div className="sheet ok pop">
               <Check size={28} color="#00661A" />
-              <h3>{done.action === "in" ? "Check-In Recorded" : "Check-Out Recorded"}</h3><p>{fmt(done.time)}</p>
+              <h3>{done.offline ? (done.action === "in" ? "Check-In Saved on This Phone" : "Check-Out Saved on This Phone") : done.action === "in" ? "Check-In Recorded" : "Check-Out Recorded"}</h3><p>{fmt(done.time)}</p>
+              {done.offline && <p>It will upload automatically as soon as the internet is back.</p>}
             </div>
           )}
           {msg && <div className="notice"><Wifi size={16} />{msg}</div>}
+          {queued > 0 && <div className="notice"><CloudOff size={16} style={{ flexShrink: 0 }} />{queued === 1 ? "1 check-in is" : `${queued} check-ins are`} saved on this phone and will upload automatically when the internet is back.</div>}
+          <PasskeySetup st={st} reload={reload} />
           {pendingIn ? (
             <div className="sheet pop">
               <Clock size={34} color="#0F1561" />
@@ -277,17 +361,51 @@ function Home({ st, reload }) {
 }
 
 function EmployeeApp() {
-  const [st, setSt] = useState(null); const [err, setErr] = useState("");
+  const [st, setSt] = useState(null); const [err, setErr] = useState(""); const [syncNote, setSyncNote] = useState("");
   const reload = async () => {
-    try { const data = await api("/api/device/status"); setClock(data.today); setSt(data); setErr(""); return data; }
-    catch (e) { setErr(e.message); return null; }
+    try {
+      let data = await api("/api/device/status");
+      // Upload check-ins saved while offline, then refresh.
+      if (queueGet().length && data.status === "approved") {
+        try {
+          const r = await syncQueue();
+          if (r.done.length || r.failed.length) data = await api("/api/device/status");
+          if (r.failed.length) setSyncNote(`${r.failed.length} saved check-in${r.failed.length === 1 ? "" : "s"} could not be uploaded: ${r.failed[0].error} Please ask your admin to add ${r.failed.length === 1 ? "it" : "them"}.`);
+          else if (r.done.length) setSyncNote(`${r.done.length} saved check-in${r.done.length === 1 ? " was" : "s were"} uploaded.`);
+        } catch { /* try again later */ }
+      }
+      setClock(data.today); setSt(data); setErr("");
+      localStorage.setItem("hz_status", JSON.stringify(data));
+      return data;
+    } catch (e) {
+      if (e.status === 0) {
+        // Offline: keep working from the last saved status.
+        const cached = localStorage.getItem("hz_status");
+        if (cached) {
+          const today = pkToday();
+          setClock(today);
+          setSt(prev => ({ ...(prev || JSON.parse(cached)), offline: true, atShop: false, today, now: nowTime() }));
+          setErr(""); return null;
+        }
+      }
+      setErr(e.message); return null;
+    }
   };
+  // Shows a check-in saved offline straight away, before it is uploaded.
+  const addLocal = (action, date, time, rec) => setSt(prev => {
+    const attendance = action === "in" ? [...prev.attendance, { id: "local-" + Date.now(), date, in: time, out: null }] : prev.attendance.map(a => a === rec || a.id === rec.id ? { ...a, out: time } : a);
+    const next = { ...prev, attendance };
+    localStorage.setItem("hz_status", JSON.stringify({ ...next, offline: false }));
+    return next;
+  });
   useEffect(() => {
     reload();
+    if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js").catch(() => {});
+    window.addEventListener("online", reload);
     const onVis = () => { if (document.visibilityState === "visible") reload(); };
     document.addEventListener("visibilitychange", onVis);
     const t = setInterval(onVis, 30000);
-    return () => { document.removeEventListener("visibilitychange", onVis); clearInterval(t); };
+    return () => { document.removeEventListener("visibilitychange", onVis); clearInterval(t); window.removeEventListener("online", reload); };
   }, []);
   const NetIcon = st?.atShop ? Wifi : Signal;
   const serverVersion = useServerVersion();
@@ -295,7 +413,7 @@ function EmployeeApp() {
     <div className="pa applayout">
       <style>{CSS}</style>
       <div className="appscreen">
-        <div className="status"><span>{st ? fmt(st.now) : ""}</span>{st && <span><NetIcon size={14} /> {st.atShop ? "Pharmacy Wi-Fi" : "Not on pharmacy Wi-Fi"}</span>}</div>
+        <div className="status"><span>{st ? fmt(st.offline ? nowTime() : st.now) : ""}</span>{st && <span>{st.offline ? <><CloudOff size={14} /> Offline</> : <><NetIcon size={14} /> {st.atShop ? "Pharmacy Wi-Fi" : "Not on pharmacy Wi-Fi"}</>}</span>}</div>
         <Brand />
         {serverVersion && serverVersion !== APP_VERSION && <div className="updbar" style={{ marginBottom: 0 }}><RefreshCw size={18} /><span>Haazir has been updated.</span><button className="btn small primary" onClick={() => freshReload(serverVersion)}>Reload</button></div>}
         {!st && !err && <p className="muted">Loading…</p>}
@@ -311,7 +429,8 @@ function EmployeeApp() {
           </div>
         )}
         {st && st.status === "ended" && <div className="sheet pop" style={{ marginTop: 30 }}><h3>Access Ended</h3><p>{st.name}'s last working day was {longDate(st.left)}. Attendance can no longer be recorded from this phone.</p></div>}
-        {st && st.status === "approved" && <Home st={st} reload={reload} />}
+        {syncNote && <div className="notice" onClick={() => setSyncNote("")}>{syncNote}</div>}
+        {st && st.status === "approved" && <Home st={st} reload={reload} addLocal={addLocal} />}
         <Copyright />
       </div>
     </div>

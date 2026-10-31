@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.14.0";
+const APP_VERSION = "2.0.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -264,7 +264,10 @@ const pad = n => String(n).padStart(2, "0");
 const dstr = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const toMin = t => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
 const fromMin = m => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
-const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+// Haazir always uses Pakistan time, whatever the phone's own time zone.
+const PK = (o) => Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Karachi", hourCycle: "h23", ...o }).formatToParts(new Date()).map(p => [p.type, p.value]));
+const nowTime = () => { const p = PK({ hour: "2-digit", minute: "2-digit" }); return `${p.hour === "24" ? "00" : p.hour}:${p.minute}`; };
+const pkToday = () => { const p = PK({ year: "numeric", month: "2-digit", day: "2-digit" }); return `${p.year}-${p.month}-${p.day}`; };
 let TODAY = dstr(new Date());
 const fmt = t => { if (!t)
     return "—"; let [h, m] = t.split(":").map(Number); const ap = h >= 12 ? "PM" : "AM"; h = h % 12 || 12; return `${h}:${pad(m)} ${ap}`; };
@@ -486,6 +489,13 @@ async function saveBlob(blob, name) {
     setTimeout(() => URL.revokeObjectURL(url), 5000);
     return true;
 }
+/* ---------- base64url, passkeys, browser push ---------- */
+const b64uToBytes = s => { s = String(s).replace(/-/g, "+").replace(/_/g, "/"); const b = atob(s + "===".slice((s.length + 3) % 4)); return Uint8Array.from(b, c => c.charCodeAt(0)); };
+const bytesToB64u = buf => { let bin = ""; new Uint8Array(buf).forEach(x => { bin += String.fromCharCode(x); }); return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
+const passkeysSupported = () => !inAndroidApp() && window.isSecureContext && !!window.PublicKeyCredential;
+const webPushSupported = () => !inAndroidApp() && window.isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const isIos = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
 /* ---------- Excel files (.xlsx) ---------- */
 const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) {
     let c = n;
@@ -904,7 +914,84 @@ function LateForm({ st, onClose, reload }) {
             React.createElement("button", { className: "btn primary block", onClick: send, disabled: busy }, "Submit Request"),
             React.createElement("button", { className: "btn block", onClick: onClose }, "Cancel"))));
 }
-function Home({ st, reload }) {
+/* ---------- check-ins saved offline ---------- */
+const queueGet = () => { try {
+    return JSON.parse(localStorage.getItem("hz_queue") || "[]");
+}
+catch {
+    return [];
+} };
+const queueSet = q => localStorage.setItem("hz_queue", JSON.stringify(q));
+// Uploads saved check-ins. Each carries the counter code shown at that moment, which the server checks against the time.
+async function syncQueue() {
+    const q = queueGet();
+    if (!q.length)
+        return { done: [], failed: [] };
+    const r = await api("/api/punch/offline", { items: q });
+    const done = [], failed = [];
+    queueSet(q.filter(it => {
+        const res = r.results.find(x => x.id === it.id);
+        if (!res)
+            return true;
+        if (res.ok) {
+            done.push(res);
+            return false;
+        }
+        if (res.final) {
+            failed.push({ ...it, error: res.error });
+            return false;
+        }
+        return true;
+    }));
+    return { done, failed };
+}
+/* ---------- passkeys (fingerprint / Face ID in the browser) ---------- */
+async function passkeyCreate(emp) {
+    const { challenge } = await api("/api/passkey/challenge");
+    const cred = await navigator.credentials.create({ publicKey: {
+            challenge: new TextEncoder().encode(challenge), rp: { name: "Haazir", id: location.hostname },
+            user: { id: new TextEncoder().encode(emp.id), name: emp.id, displayName: emp.name },
+            pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+            authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" },
+            timeout: 60000, attestation: "none"
+        } });
+    await api("/api/passkey/register", { id: cred.id, clientDataJSON: bytesToB64u(cred.response.clientDataJSON), attestationObject: bytesToB64u(cred.response.attestationObject) });
+}
+async function passkeyGet(id) {
+    const { challenge } = await api("/api/passkey/challenge");
+    const a = await navigator.credentials.get({ publicKey: { challenge: new TextEncoder().encode(challenge), rpId: location.hostname, allowCredentials: [{ type: "public-key", id: b64uToBytes(id) }], userVerification: "required", timeout: 60000 } });
+    return { id: a.id, clientDataJSON: bytesToB64u(a.response.clientDataJSON), authenticatorData: bytesToB64u(a.response.authenticatorData), signature: bytesToB64u(a.response.signature) };
+}
+function PasskeySetup({ st, reload }) {
+    const [hide, setHide] = useState(!!localStorage.getItem("hz_pk_later"));
+    const [err, setErr] = useState("");
+    const [busy, setBusy] = useState(false);
+    if (hide || !passkeysSupported() || st.passkeyId || st.offline)
+        return null;
+    const setup = async () => {
+        setBusy(true);
+        setErr("");
+        try {
+            await passkeyCreate(st.employee);
+            await reload();
+        }
+        catch (e) {
+            setErr(e.name === "NotAllowedError" ? "Setup was cancelled or not confirmed. Please try again." : e.message || "Fingerprint / Face ID could not be set up on this phone.");
+        }
+        setBusy(false);
+    };
+    return (React.createElement("div", { className: "sheet", style: { textAlign: "left", alignItems: "stretch" } },
+        React.createElement("div", { className: "row", style: { alignItems: "center", flexWrap: "nowrap" } },
+            React.createElement(Fingerprint, { size: 30, color: "#007A1F" }),
+            React.createElement("div", null,
+                React.createElement("b", null, "Use Fingerprint or Face ID"),
+                React.createElement("div", { className: "muted", style: { fontSize: 13 } }, "Confirm check-ins with your phone's fingerprint or Face ID."))),
+        err && React.createElement("div", { className: "err", style: { marginTop: 0 } }, err),
+        React.createElement("div", { className: "row" },
+            React.createElement("button", { className: "btn primary", style: { flex: 1 }, disabled: busy, onClick: setup }, "Set Up"),
+            React.createElement("button", { className: "btn", onClick: () => { localStorage.setItem("hz_pk_later", "1"); setHide(true); } }, "Not Now"))));
+}
+function Home({ st, reload, addLocal }) {
     const emp = st.employee;
     const [step, setStep] = useState(null);
     const [msg, setMsg] = useState("");
@@ -912,6 +999,8 @@ function Home({ st, reload }) {
     const [busy, setBusy] = useState(false);
     const [code, setCode] = useState("");
     const [bioState, setBioState] = useState(null);
+    const [wa, setWa] = useState(null);
+    const queued = queueGet().length;
     const nowM = toMin(st.now);
     const open = openRecordClient(emp, st.attendance, nowM);
     const shiftDate = open ? open.date : pickShiftDate(emp, nowM);
@@ -928,8 +1017,14 @@ function Home({ st, reload }) {
         setDone(null);
         setCode("");
         setBioState(null);
+        setWa(null);
         const fresh = await reload();
-        if (fresh && !fresh.atShop) {
+        if (!fresh) {
+            setMsg("No internet connection. Enter the counter code, and your check-in will be saved on this phone and uploaded later.");
+            setStep("code");
+            return;
+        }
+        if (!fresh.atShop) {
             setStep("code");
             return;
         }
@@ -938,6 +1033,34 @@ function Home({ st, reload }) {
     const verify = async (c) => {
         setMsg("");
         if (!inAndroidApp()) {
+            // In a phone browser: fingerprint / Face ID through a passkey, when one is set up and the phone is online.
+            if (passkeysSupported() && st.passkeyId && !st.offline) {
+                setStep("bio");
+                try {
+                    const a = await passkeyGet(st.passkeyId);
+                    setWa(a);
+                    setBioState("ok");
+                    if (st.mode === "either")
+                        return submit({ webauthn: a, code: c });
+                    setStep("pin");
+                    return;
+                }
+                catch (e) {
+                    if (e.name === "NotAllowedError") {
+                        if (st.mode === "either") {
+                            setMsg("Fingerprint / Face ID was not confirmed. Please enter your PIN instead.");
+                            setStep("pin");
+                            return;
+                        }
+                        setStep(null);
+                        setMsg("Fingerprint / Face ID was not confirmed. Please try again.");
+                        return;
+                    }
+                    setBioState("unavailable");
+                    setStep("pin");
+                    return;
+                }
+            }
             setStep("pin");
             return;
         }
@@ -976,9 +1099,25 @@ function Home({ st, reload }) {
             await reload();
         }
         catch (e) {
-            setMsg(e.message);
-            if (e.status === 403)
+            if (e.status === 0) {
+                // No internet: keep the check-in on this phone with the counter code, and upload it later.
+                if (!code) {
+                    setMsg("No internet connection. Enter the counter code shown at the pharmacy counter, so your check-in can be saved on this phone.");
+                    setStep("code");
+                    setBusy(false);
+                    return;
+                }
+                const t = nowTime();
+                queueSet([...queueGet(), { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 10), at: Date.now(), code, pin: body.pin, bio: body.bio === true, bioUnavailable: body.bioUnavailable === true || (!inAndroidApp() && !!body.pin) }]);
+                addLocal(action, shiftDate, t, rec);
                 setStep(null);
+                setDone({ action, time: t, offline: true });
+            }
+            else {
+                setMsg(e.message);
+                if (e.status === 403)
+                    setStep(null);
+            }
         }
         setBusy(false);
     };
@@ -995,7 +1134,7 @@ function Home({ st, reload }) {
         } return false; };
         return () => { delete window.hzBack; };
     }, [step, done, msg]);
-    const submitPin = pin => submit({ pin, code, bio: bioState === "ok", bioUnavailable: bioState === "unavailable" });
+    const submitPin = pin => submit({ pin, code, bio: bioState === "ok" && inAndroidApp(), webauthn: inAndroidApp() ? undefined : wa || undefined, bioUnavailable: bioState === "unavailable" });
     return (React.createElement(React.Fragment, null,
         React.createElement("div", { className: "hello" },
             React.createElement("h2", null,
@@ -1024,11 +1163,17 @@ function Home({ st, reload }) {
         !step && (React.createElement(React.Fragment, null,
             done && (React.createElement("div", { className: "sheet ok pop" },
                 React.createElement(Check, { size: 28, color: "#00661A" }),
-                React.createElement("h3", null, done.action === "in" ? "Check-In Recorded" : "Check-Out Recorded"),
-                React.createElement("p", null, fmt(done.time)))),
+                React.createElement("h3", null, done.offline ? (done.action === "in" ? "Check-In Saved on This Phone" : "Check-Out Saved on This Phone") : done.action === "in" ? "Check-In Recorded" : "Check-Out Recorded"),
+                React.createElement("p", null, fmt(done.time)),
+                done.offline && React.createElement("p", null, "It will upload automatically as soon as the internet is back."))),
             msg && React.createElement("div", { className: "notice" },
                 React.createElement(Wifi, { size: 16 }),
                 msg),
+            queued > 0 && React.createElement("div", { className: "notice" },
+                React.createElement(CloudOff, { size: 16, style: { flexShrink: 0 } }),
+                queued === 1 ? "1 check-in is" : `${queued} check-ins are`,
+                " saved on this phone and will upload automatically when the internet is back."),
+            React.createElement(PasskeySetup, { st: st, reload: reload }),
             pendingIn ? (React.createElement("div", { className: "sheet pop" },
                 React.createElement(Clock, { size: 34, color: "#0F1561" }),
                 React.createElement("h3", null, "Check-In Request Pending"),
@@ -1092,26 +1237,62 @@ function Home({ st, reload }) {
 function EmployeeApp() {
     const [st, setSt] = useState(null);
     const [err, setErr] = useState("");
+    const [syncNote, setSyncNote] = useState("");
     const reload = async () => {
         try {
-            const data = await api("/api/device/status");
+            let data = await api("/api/device/status");
+            // Upload check-ins saved while offline, then refresh.
+            if (queueGet().length && data.status === "approved") {
+                try {
+                    const r = await syncQueue();
+                    if (r.done.length || r.failed.length)
+                        data = await api("/api/device/status");
+                    if (r.failed.length)
+                        setSyncNote(`${r.failed.length} saved check-in${r.failed.length === 1 ? "" : "s"} could not be uploaded: ${r.failed[0].error} Please ask your admin to add ${r.failed.length === 1 ? "it" : "them"}.`);
+                    else if (r.done.length)
+                        setSyncNote(`${r.done.length} saved check-in${r.done.length === 1 ? " was" : "s were"} uploaded.`);
+                }
+                catch { /* try again later */ }
+            }
             setClock(data.today);
             setSt(data);
             setErr("");
+            localStorage.setItem("hz_status", JSON.stringify(data));
             return data;
         }
         catch (e) {
+            if (e.status === 0) {
+                // Offline: keep working from the last saved status.
+                const cached = localStorage.getItem("hz_status");
+                if (cached) {
+                    const today = pkToday();
+                    setClock(today);
+                    setSt(prev => ({ ...(prev || JSON.parse(cached)), offline: true, atShop: false, today, now: nowTime() }));
+                    setErr("");
+                    return null;
+                }
+            }
             setErr(e.message);
             return null;
         }
     };
+    // Shows a check-in saved offline straight away, before it is uploaded.
+    const addLocal = (action, date, time, rec) => setSt(prev => {
+        const attendance = action === "in" ? [...prev.attendance, { id: "local-" + Date.now(), date, in: time, out: null }] : prev.attendance.map(a => a === rec || a.id === rec.id ? { ...a, out: time } : a);
+        const next = { ...prev, attendance };
+        localStorage.setItem("hz_status", JSON.stringify({ ...next, offline: false }));
+        return next;
+    });
     useEffect(() => {
         reload();
+        if ("serviceWorker" in navigator && window.isSecureContext)
+            navigator.serviceWorker.register("sw.js").catch(() => { });
+        window.addEventListener("online", reload);
         const onVis = () => { if (document.visibilityState === "visible")
             reload(); };
         document.addEventListener("visibilitychange", onVis);
         const t = setInterval(onVis, 30000);
-        return () => { document.removeEventListener("visibilitychange", onVis); clearInterval(t); };
+        return () => { document.removeEventListener("visibilitychange", onVis); clearInterval(t); window.removeEventListener("online", reload); };
     }, []);
     const NetIcon = st?.atShop ? Wifi : Signal;
     const serverVersion = useServerVersion();
@@ -1119,11 +1300,13 @@ function EmployeeApp() {
         React.createElement("style", null, CSS),
         React.createElement("div", { className: "appscreen" },
             React.createElement("div", { className: "status" },
-                React.createElement("span", null, st ? fmt(st.now) : ""),
-                st && React.createElement("span", null,
+                React.createElement("span", null, st ? fmt(st.offline ? nowTime() : st.now) : ""),
+                st && React.createElement("span", null, st.offline ? React.createElement(React.Fragment, null,
+                    React.createElement(CloudOff, { size: 14 }),
+                    " Offline") : React.createElement(React.Fragment, null,
                     React.createElement(NetIcon, { size: 14 }),
                     " ",
-                    st.atShop ? "Pharmacy Wi-Fi" : "Not on pharmacy Wi-Fi")),
+                    st.atShop ? "Pharmacy Wi-Fi" : "Not on pharmacy Wi-Fi"))),
             React.createElement(Brand, null),
             serverVersion && serverVersion !== APP_VERSION && React.createElement("div", { className: "updbar", style: { marginBottom: 0 } },
                 React.createElement(RefreshCw, { size: 18 }),
@@ -1153,7 +1336,8 @@ function EmployeeApp() {
                     "'s last working day was ",
                     longDate(st.left),
                     ". Attendance can no longer be recorded from this phone.")),
-            st && st.status === "approved" && React.createElement(Home, { st: st, reload: reload }),
+            syncNote && React.createElement("div", { className: "notice", onClick: () => setSyncNote("") }, syncNote),
+            st && st.status === "approved" && React.createElement(Home, { st: st, reload: reload, addLocal: addLocal }),
             React.createElement(Copyright, null))));
 }
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(EmployeeApp, null));

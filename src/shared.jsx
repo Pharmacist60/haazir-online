@@ -202,7 +202,10 @@ const pad = n => String(n).padStart(2, "0");
 const dstr = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const toMin = t => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
 const fromMin = m => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
-const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+// Haazir always uses Pakistan time, whatever the phone's own time zone.
+const PK = (o) => Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Karachi", hourCycle: "h23", ...o }).formatToParts(new Date()).map(p => [p.type, p.value]));
+const nowTime = () => { const p = PK({ hour: "2-digit", minute: "2-digit" }); return `${p.hour === "24" ? "00" : p.hour}:${p.minute}`; };
+const pkToday = () => { const p = PK({ year: "numeric", month: "2-digit", day: "2-digit" }); return `${p.year}-${p.month}-${p.day}`; };
 let TODAY = dstr(new Date());
 const fmt = t => { if (!t) return "—"; let [h, m] = t.split(":").map(Number); const ap = h >= 12 ? "PM" : "AM"; h = h % 12 || 12; return `${h}:${pad(m)} ${ap}`; };
 const stamp = () => `${longDate(TODAY)}, ${fmt(nowTime())}`;
@@ -342,6 +345,14 @@ async function saveBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
   return true;
 }
+
+/* ---------- base64url, passkeys, browser push ---------- */
+const b64uToBytes = s => { s = String(s).replace(/-/g, "+").replace(/_/g, "/"); const b = atob(s + "===".slice((s.length + 3) % 4)); return Uint8Array.from(b, c => c.charCodeAt(0)); };
+const bytesToB64u = buf => { let bin = ""; new Uint8Array(buf).forEach(x => { bin += String.fromCharCode(x); }); return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
+const passkeysSupported = () => !inAndroidApp() && window.isSecureContext && !!window.PublicKeyCredential;
+const webPushSupported = () => !inAndroidApp() && window.isSecureContext && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const isIos = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
 
 /* ---------- Excel files (.xlsx) ---------- */
 const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();

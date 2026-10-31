@@ -5,7 +5,7 @@ import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
 import * as L from './logic.js';
 
-export const VERSION = '1.14.0';
+export const VERSION = '2.0.0';
 
 /* ---------------- database layout ---------------- */
 // Every table, with its columns. Used to create the database, and to back up and restore it.
@@ -42,6 +42,9 @@ function schema(dialect) {
     `CREATE TABLE IF NOT EXISTS audit (id ${ID}, at TEXT NOT NULL, by_user TEXT NOT NULL, what TEXT NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, username TEXT NOT NULL, expires_at ${REAL} NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS events (id ${ID}, at_ms ${REAL} NOT NULL, at TEXT NOT NULL, type TEXT NOT NULL, emp_id TEXT, text TEXT NOT NULL, uniq TEXT UNIQUE)`,
+    `CREATE TABLE IF NOT EXISTS passkeys (id TEXT PRIMARY KEY, emp_id TEXT NOT NULL, device_id TEXT NOT NULL, rp_id TEXT NOT NULL, jwk TEXT NOT NULL, alg INTEGER NOT NULL, sign_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS webpush_subs (endpoint TEXT PRIMARY KEY, username TEXT NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at TEXT NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS offline_punches (id TEXT PRIMARY KEY, at TEXT NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS push_tokens (token TEXT PRIMARY KEY, username TEXT NOT NULL, created_at TEXT NOT NULL, last_seen TEXT NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS backups (id ${ID}, created_ms ${REAL} NOT NULL, created_at TEXT NOT NULL, kind TEXT NOT NULL, size INTEGER NOT NULL, data TEXT NOT NULL)`,
   ];
@@ -159,10 +162,10 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     const o = h[h.length - 1] & 15;
     return String((h.readUInt32BE(o) & 0x7fffffff) % 1000000).padStart(6, '0');
   }
-  async function codeValid(code) {
+  async function codeValid(code, ms = Date.now()) {
     code = String(code || '').replace(/\D/g, '');
     if (code.length !== 6) return false;
-    const secret = await counterSecret(), slot = Math.floor(Date.now() / 30000);
+    const secret = await counterSecret(), slot = Math.floor(ms / 30000);
     for (let d = -2; d <= 1; d++) if (codeFor(slot + d, secret) === code) return true;
     return false;
   }
@@ -191,6 +194,154 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     await pushEvent(type, text).catch(e => console.error('Phone notification failed:', e.message));
   }
 
+  /* ----- WebAuthn (passkeys) ----- */
+  const subtle = globalThis.crypto.subtle;
+  const b64u = buf => Buffer.from(buf).toString('base64url');
+  const fromB64u = s => Buffer.from(String(s || ''), 'base64url');
+  // Minimal CBOR reader (enough for WebAuthn attestation objects and COSE keys).
+  function cbor(buf, pos = 0) {
+    const read = () => {
+      const ib = buf[pos++], mt = ib >> 5, ai = ib & 31;
+      let n = ai;
+      if (ai === 24) n = buf[pos++];
+      else if (ai === 25) { n = buf.readUInt16BE(pos); pos += 2; }
+      else if (ai === 26) { n = buf.readUInt32BE(pos); pos += 4; }
+      else if (ai === 27) { n = Number(buf.readBigUInt64BE(pos)); pos += 8; }
+      else if (ai > 27) throw new Error('Unsupported CBOR');
+      if (mt === 0) return n;
+      if (mt === 1) return -1 - n;
+      if (mt === 2) { const v = buf.subarray(pos, pos + n); pos += n; return v; }
+      if (mt === 3) { const v = buf.subarray(pos, pos + n).toString('utf8'); pos += n; return v; }
+      if (mt === 4) { const a = []; for (let i = 0; i < n; i++) a.push(read()); return a; }
+      if (mt === 5) { const m = new Map(); for (let i = 0; i < n; i++) { const k = read(); m.set(k, read()); } return m; }
+      if (mt === 7) return ai === 20 ? false : ai === 21 ? true : null;
+      throw new Error('Unsupported CBOR');
+    };
+    const value = read();
+    return { value, end: pos };
+  }
+  async function waSecret() {
+    let s = await getSetting('wa_secret');
+    if (!s) { s = crypto.randomBytes(32).toString('hex'); await setSetting('wa_secret', s); }
+    return s;
+  }
+  // Challenges are signed by the server, so no storage is needed: device + expiry + random, then an HMAC.
+  async function makeChallenge(deviceId) {
+    const body = `${deviceId.slice(0, 32)}.${Date.now() + 5 * 60000}.${crypto.randomBytes(12).toString('hex')}`;
+    return body + '.' + crypto.createHmac('sha256', await waSecret()).update(body).digest('hex').slice(0, 32);
+  }
+  async function challengeOk(ch, deviceId) {
+    const parts = String(ch || '').split('.');
+    if (parts.length !== 4 || parts[0] !== deviceId.slice(0, 32) || Number(parts[1]) < Date.now()) return false;
+    const mac = crypto.createHmac('sha256', await waSecret()).update(parts.slice(0, 3).join('.')).digest('hex').slice(0, 32);
+    return mac.length === parts[3].length && crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(parts[3]));
+  }
+  const originOk = o => { try { const u = new URL(o); return u.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(u.hostname); } catch { return false; } };
+  function parseAuthData(ad) {
+    const out = { rpIdHash: ad.subarray(0, 32), flags: ad[32], signCount: ad.readUInt32BE(33) };
+    if (out.flags & 0x40) {
+      const len = ad.readUInt16BE(53);
+      out.credId = ad.subarray(55, 55 + len);
+      out.cose = cbor(ad, 55 + len).value;
+    }
+    return out;
+  }
+  function coseToJwk(m) {
+    const kty = m.get(1), alg = m.get(3);
+    if (kty === 2 && alg === -7 && m.get(-1) === 1) return { alg, jwk: { kty: 'EC', crv: 'P-256', x: b64u(m.get(-2)), y: b64u(m.get(-3)), ext: true } };
+    if (kty === 3 && alg === -257) return { alg, jwk: { kty: 'RSA', n: b64u(m.get(-1)), e: b64u(m.get(-2)), alg: 'RS256', ext: true } };
+    throw new Fail(400, 'This phone offered an unsupported type of fingerprint key.');
+  }
+  async function verifyRegistration(req, b, dev) {
+    let cd; try { cd = JSON.parse(fromB64u(b.clientDataJSON).toString('utf8')); } catch { throw new Fail(400, 'Invalid fingerprint setup data.'); }
+    need(cd.type === 'webauthn.create' && originOk(cd.origin), 'Invalid fingerprint setup data.');
+    need(await challengeOk(fromB64u(cd.challenge).toString('utf8'), dev.id), 'The fingerprint setup took too long. Please try again.');
+    const rpId = new URL(cd.origin).hostname;
+    let att; try { att = cbor(fromB64u(b.attestationObject)).value; } catch { throw new Fail(400, 'Invalid fingerprint setup data.'); }
+    const ad = parseAuthData(Buffer.from(att.get('authData')));
+    need(Buffer.compare(ad.rpIdHash, crypto.createHash('sha256').update(rpId).digest()) === 0, 'Invalid fingerprint setup data.');
+    need((ad.flags & 0x01) && (ad.flags & 0x04), 'Fingerprint or Face ID was not confirmed. Please try again.');
+    need(ad.credId && ad.cose, 'Invalid fingerprint setup data.');
+    const { alg, jwk } = coseToJwk(ad.cose);
+    return { id: b64u(ad.credId), rpId, jwk, alg, signCount: ad.signCount };
+  }
+  function derToRaw(sig) {
+    let p = 2; if (sig[1] & 0x80) p += sig[1] & 0x7f;
+    const int = () => { p++; const len = sig[p++]; let v = sig.subarray(p, p + len); p += len; while (v.length > 32 && v[0] === 0) v = v.subarray(1); return Buffer.concat([Buffer.alloc(32 - v.length), v]); };
+    return Buffer.concat([int(), int()]);
+  }
+  async function verifyAssertion(req, wa, dev, emp) {
+    const pk = await one('SELECT * FROM passkeys WHERE id = ? AND device_id = ? AND emp_id = ?', String(wa.id || ''), dev.id, emp.id);
+    need(pk, 'This fingerprint / Face ID is not registered for this phone. Set it up again.', 401);
+    const cdRaw = fromB64u(wa.clientDataJSON); let cd; try { cd = JSON.parse(cdRaw.toString('utf8')); } catch { throw new Fail(400, 'Invalid fingerprint data.'); }
+    need(cd.type === 'webauthn.get' && originOk(cd.origin) && new URL(cd.origin).hostname === pk.rp_id, 'Invalid fingerprint data.');
+    need(await challengeOk(fromB64u(cd.challenge).toString('utf8'), dev.id), 'The fingerprint check took too long. Please try again.');
+    const adRaw = fromB64u(wa.authenticatorData), ad = parseAuthData(adRaw);
+    need(Buffer.compare(ad.rpIdHash, crypto.createHash('sha256').update(pk.rp_id).digest()) === 0, 'Invalid fingerprint data.');
+    need((ad.flags & 0x01) && (ad.flags & 0x04), 'Fingerprint or Face ID was not confirmed.', 401);
+    const data = Buffer.concat([adRaw, crypto.createHash('sha256').update(cdRaw).digest()]);
+    const jwk = JSON.parse(pk.jwk), sig = fromB64u(wa.signature);
+    const ok = Number(pk.alg) === -7
+      ? await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, await subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']), derToRaw(sig), data)
+      : await subtle.verify({ name: 'RSASSA-PKCS1-v1_5' }, await subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']), sig, data);
+    need(ok, 'Fingerprint / Face ID could not be verified.', 401);
+    if (ad.signCount > 0 || Number(pk.sign_count) > 0) need(ad.signCount > Number(pk.sign_count), 'This fingerprint key looks copied. Please set it up again.', 401);
+    await run('UPDATE passkeys SET sign_count = ? WHERE id = ?', ad.signCount, pk.id);
+    return true;
+  }
+
+  /* ----- Web Push (RFC 8291 encryption, RFC 8292 VAPID) ----- */
+  async function vapidKeys() {
+    const saved = await getSetting('vapid');
+    if (saved) return JSON.parse(saved);
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const keys = { privateJwk: await subtle.exportKey('jwk', kp.privateKey), publicKey: b64u(await subtle.exportKey('raw', kp.publicKey)) };
+    await setSetting('vapid', JSON.stringify(keys));
+    return keys;
+  }
+  const hmac = (key, data) => crypto.createHmac('sha256', key).update(data).digest();
+  // Encrypts a push message for one browser (aes128gcm). `fixed` is only used by tests (RFC 8291 example values).
+  async function webPushEncrypt(payload, p256dhB64, authB64, fixed = null) {
+    const uaPublic = fromB64u(p256dhB64), authSecret = fromB64u(authB64);
+    let asPublic, asPrivate;
+    if (fixed) {
+      asPublic = fromB64u(fixed.asPublic);
+      asPrivate = await subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', d: fixed.asPrivate, x: b64u(asPublic.subarray(1, 33)), y: b64u(asPublic.subarray(33, 65)), ext: true }, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+    } else {
+      const kp = await subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+      asPrivate = kp.privateKey; asPublic = Buffer.from(await subtle.exportKey('raw', kp.publicKey));
+    }
+    const uaKey = await subtle.importKey('raw', uaPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+    const shared = Buffer.from(await subtle.deriveBits({ name: 'ECDH', public: uaKey }, asPrivate, 256));
+    const prkKey = hmac(authSecret, shared);
+    const ikm = hmac(prkKey, Buffer.concat([Buffer.from('WebPush: info\0'), uaPublic, asPublic, Buffer.from([1])]));
+    const salt = fixed ? fromB64u(fixed.salt) : crypto.randomBytes(16);
+    const prk = hmac(salt, ikm);
+    const cek = hmac(prk, Buffer.concat([Buffer.from('Content-Encoding: aes128gcm\0'), Buffer.from([1])])).subarray(0, 16);
+    const nonce = hmac(prk, Buffer.concat([Buffer.from('Content-Encoding: nonce\0'), Buffer.from([1])])).subarray(0, 12);
+    const key = await subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']);
+    const ct = Buffer.from(await subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, Buffer.concat([Buffer.from(payload), Buffer.from([2])])));
+    const header = Buffer.alloc(21); salt.copy(header, 0); header.writeUInt32BE(4096, 16); header[20] = 65;
+    return Buffer.concat([header, asPublic, ct]);
+  }
+  async function webPushSend(sub, payload) {
+    const keys = await vapidKeys();
+    const aud = new URL(sub.endpoint).origin, now = Math.floor(Date.now() / 1000);
+    const head = b64u(JSON.stringify({ typ: 'JWT', alg: 'ES256' })) + '.' + b64u(JSON.stringify({ aud, exp: now + 12 * 3600, sub: 'mailto:admin@haazir.app' }));
+    const signKey = await subtle.importKey('jwk', keys.privateJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+    const jwt = head + '.' + b64u(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, signKey, Buffer.from(head)));
+    const body = await webPushEncrypt(JSON.stringify(payload), sub.p256dh, sub.auth);
+    const r = await fetchFn(sub.endpoint, { method: 'POST', headers: { Authorization: `vapid t=${jwt}, k=${keys.publicKey}`, 'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '86400', Urgency: 'high' }, body });
+    if (r.status === 404 || r.status === 410) { await run('DELETE FROM webpush_subs WHERE endpoint = ?', sub.endpoint); return 'removed'; }
+    if (!r.ok) throw new Error('Browser push failed: ' + r.status);
+    return 'sent';
+  }
+  async function webPushTo(subs, title, body) {
+    let sent = 0, failed = 0;
+    await Promise.all(subs.map(async s => { try { if ((await webPushSend(s, { title, body })) === 'sent') sent++; } catch (e) { failed++; console.error(e.message); } }));
+    return { sent, failed };
+  }
+
   /* ----- phone notifications (Firebase Cloud Messaging) ----- */
   const NOTE_TITLES = { checkin: 'Check-In', checkout: 'Check-Out', late: 'Late Arrival', absent: 'Not Checked In', overleave: 'Beyond Allowed Leaves', early: 'Left Early', pinreset: 'PIN Reset Request', laterequest: 'Late Entry Request' };
   let fcmToken = null;
@@ -199,7 +350,9 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     const b64 = o => Buffer.from(typeof o === 'string' ? o : JSON.stringify(o)).toString('base64url');
     const now = Math.floor(Date.now() / 1000);
     const head = b64({ alg: 'RS256', typ: 'JWT' }) + '.' + b64({ iss: sa.client_email, scope: 'https://www.googleapis.com/auth/firebase.messaging', aud: sa.token_uri || 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 });
-    const jwt = head + '.' + crypto.createSign('RSA-SHA256').update(head).sign(sa.private_key).toString('base64url');
+    const der = Buffer.from(sa.private_key.replace(/-----[^-]+-----|\s/g, ''), 'base64');
+    const key = await globalThis.crypto.subtle.importKey('pkcs8', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
+    const jwt = head + '.' + Buffer.from(await globalThis.crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, Buffer.from(head))).toString('base64url');
     const r = await fetchFn(sa.token_uri || 'https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: jwt }).toString() });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.access_token) throw new Error('Firebase sign-in failed: ' + (j.error_description || j.error || r.status));
@@ -227,10 +380,13 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   }
   // Each admin receives the types they have switched on in Notification Settings.
   async function pushEvent(type, text) {
+    const title = 'Haazir: ' + (NOTE_TITLES[type] || 'Notification');
+    const wants = r => { try { return JSON.parse(r.notify)[type] !== false; } catch { return true; } };
+    const subs = (await all('SELECT w.*, a.notify FROM webpush_subs w JOIN admins a ON a.username = w.username')).filter(wants);
+    if (subs.length) await webPushTo(subs, title, text);
     if (!(await getSetting('fcm_sa'))) return;
-    const rows = await all('SELECT p.token, a.notify FROM push_tokens p JOIN admins a ON a.username = p.username');
-    const wanted = rows.filter(r => { try { return JSON.parse(r.notify)[type] !== false; } catch { return true; } });
-    await pushTo(wanted, 'Haazir: ' + (NOTE_TITLES[type] || 'Notification'), text, type);
+    const rows = (await all('SELECT p.token, a.notify FROM push_tokens p JOIN admins a ON a.username = p.username')).filter(wants);
+    await pushTo(rows, title, text, type);
   }
   async function priorAbsences(e, date) {
     const start = await trackingStartDate();
@@ -267,7 +423,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   async function exportData() {
     const tables = {};
     for (const t of Object.keys(TABLES)) tables[t] = await all(`SELECT ${TABLES[t].join(', ')} FROM ${t}`);
-    tables.settings = tables.settings.filter(r => r.key !== 'fcm_sa');
+    tables.settings = tables.settings.filter(r => !['fcm_sa', 'vapid', 'wa_secret'].includes(r.key));
     return { app: 'haazir', format: 1, version: VERSION, created: L.stamp(), tables };
   }
   async function saveBackup(kind) {
@@ -289,7 +445,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     const info = checkBackup(data);
     await saveBackup('Before restore');
     // The database timer's own settings belong to this Supabase project, not to the backup.
-    const keep = await all("SELECT key, value FROM settings WHERE key IN ('cron_key', 'cron', 'fcm_sa')");
+    const keep = await all("SELECT key, value FROM settings WHERE key IN ('cron_key', 'cron', 'fcm_sa', 'vapid', 'wa_secret')");
     await db.tx(async t => {
       const q = (sql, ...p) => t.all(sql, p);
       for (const name of Object.keys(TABLES)) await q(`DELETE FROM ${name}`);
@@ -398,7 +554,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
       audit: sup ? await all('SELECT at, by_user AS by, what FROM audit ORDER BY id DESC LIMIT 500') : [],
       cron: sup ? await getSetting('cron', '') : '',
       trackingStart, rules: await rules(),
-      push: { configured: sup ? ((JSON.parse((await getSetting('fcm_sa')) || 'null') || {}).project_id || null) : !!(await getSetting('fcm_sa')), myDevices: Number((await one('SELECT CAST(COUNT(*) AS INTEGER) AS n FROM push_tokens WHERE username = ?', a.username)).n) },
+      push: { configured: sup ? ((JSON.parse((await getSetting('fcm_sa')) || 'null') || {}).project_id || null) : !!(await getSetting('fcm_sa')), myDevices: Number((await one('SELECT CAST(COUNT(*) AS INTEGER) AS n FROM push_tokens WHERE username = ?', a.username)).n), myBrowsers: Number((await one('SELECT CAST(COUNT(*) AS INTEGER) AS n FROM webpush_subs WHERE username = ?', a.username)).n) },
     };
   });
 
@@ -618,10 +774,12 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   });
   route('POST', '/api/push/test', async ({ req }) => {
     const a = await requireAdmin(req);
-    need(await getSetting('fcm_sa'), 'Phone notifications are not set up yet. A super admin sets them up under Admins & Security.');
-    const rows = await all('SELECT token FROM push_tokens WHERE username = ?', a.username);
-    need(rows.length, 'No phone is registered for your account yet. Open the Admin Dashboard in the Haazir Android app and allow notifications.');
-    const r = await pushTo(rows, 'Haazir: Test', `This is a test notification for ${a.name}. Phone notifications are working.`, 'test');
+    const rows = (await getSetting('fcm_sa')) ? await all('SELECT token FROM push_tokens WHERE username = ?', a.username) : [];
+    const subs = await all('SELECT * FROM webpush_subs WHERE username = ?', a.username);
+    need(rows.length || subs.length, 'No phone or browser is registered for notifications on your account yet.');
+    const text = `This is a test notification for ${a.name}. Notifications are working.`;
+    const r1 = await pushTo(rows, 'Haazir: Test', text, 'test'), r2 = await webPushTo(subs, 'Haazir: Test', text);
+    const r = { sent: r1.sent + r2.sent, failed: r1.failed + r2.failed };
     need(r.sent > 0, 'The test notification could not be sent. Check the Firebase setup.', 502);
     return { ok: true, ...r };
   });
@@ -753,6 +911,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
       return {
         ...base, status: 'approved',
         employee: { id: emp.id, name: emp.name, joined: emp.joined, left: emp.left, history: emp.history },
+        passkeyId: ((await one('SELECT id FROM passkeys WHERE device_id = ?', dev.id)) || {}).id || null,
         attendance: (await all('SELECT * FROM attendance WHERE emp_key = ? AND date >= ? ORDER BY date', emp.id, L.addDays(L.today(), -40))).map(recOut),
         lateReqs: (await all('SELECT * FROM late_requests WHERE emp_id = ? ORDER BY id DESC LIMIT 5', emp.id)).map(r => ({ id: Number(r.id), date: r.date, in: r.in_time, out: r.out_time, status: r.status })),
       };
@@ -776,6 +935,61 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     return { ok: true };
   });
 
+  // Checks fingerprint/face (Android app or passkey) and/or the PIN, as set by the super admin. Returns true if biometric was used.
+  async function verifyIdentity(req, b, dev, row, emp, { allowPasskey }) {
+    const mode = await getSetting('mode', 'both');
+    const inApp = req.headers.get('x-haazir-app') === '1';
+    let bio = inApp && b.bio === true;
+    if (!bio && allowPasskey && b.webauthn) bio = await verifyAssertion(req, b.webauthn, dev, emp);
+    const hasPasskey = !inApp && !!(await one('SELECT 1 AS x FROM passkeys WHERE device_id = ?', dev.id));
+    const pinNeeded = mode === 'both' || !bio;
+    if (mode === 'both' && inApp && !bio) need(b.bioUnavailable === true, 'Fingerprint or face verification is required.', 401);
+    if (mode === 'both' && hasPasskey && !bio && allowPasskey) need(b.bioUnavailable === true, 'Fingerprint or Face ID verification is required.', 401);
+    if (pinNeeded) {
+      const pinRow = await one('SELECT pin_hash FROM employees WHERE id = ?', emp.id);
+      if (!checkSecret(String(b.pin || ''), pinRow.pin_hash)) {
+        const fails = Number(row.pin_fails) + 1;
+        await run('UPDATE devices SET pin_fails = ?, locked_until = ? WHERE id = ?', fails >= 5 ? 0 : fails, fails >= 5 ? Date.now() + 5 * 60 * 1000 : 0, dev.id);
+        row.pin_fails = fails >= 5 ? 0 : fails;
+        throw new Fail(401, fails >= 5 ? 'Too many incorrect PINs. Please try again in 5 minutes.' : 'Incorrect PIN. Please try again.');
+      }
+      await run('UPDATE devices SET pin_fails = 0 WHERE id = ?', dev.id);
+    }
+    return { bio, pinNeeded };
+  }
+
+  // Records a check-in or check-out at a given moment (now, or the time of a check-in saved offline).
+  async function recordPunch(emp, ms, method, offline) {
+    const T = L.dateOf(ms), t = L.timeOf(ms), nowM = L.toMin(t);
+    const mine = (await all('SELECT * FROM attendance WHERE emp_key = ? AND date >= ?', emp.id, L.addDays(T, -1))).map(recOut);
+    const open = L.openRecord(emp, mine, T, nowM);
+    const shiftDate = open ? open.date : L.pickShiftDate(emp, nowM, T);
+    need(L.settingsOn(emp, shiftDate) && L.employed(emp, shiftDate), 'Your employment has not started yet.', 403);
+    const rec = open || mine.find(a => a.date === shiftDate);
+    const note = offline ? ' (saved offline)' : '';
+    if (!rec) {
+      await run('INSERT INTO attendance (emp_key, date, in_time, method, created_at) VALUES (?, ?, ?, ?, ?)', emp.id, shiftDate, t, method, L.stamp());
+      const s = L.settingsOn(emp, shiftDate), late = Math.max(0, L.rel(t, s) - L.toMin(s.start) - s.grace);
+      await addEvent('checkin', emp.id, `${emp.name} checked in at ${L.fmt(t)}${note}.`);
+      const lateText = late >= 60 ? `${Math.floor(late / 60)} hr ${late % 60} min` : `${late} min`;
+      if (late > 0) await addEvent('late', emp.id, `${emp.name} arrived ${lateText} late. The shift started at ${L.fmt(s.start)}.`);
+      return { action: 'in', time: t };
+    }
+    need(!rec.out, 'Your shift is already complete.', 409);
+    await run('UPDATE attendance SET out_time = ? WHERE id = ?', t, rec.id);
+    await addEvent('checkout', emp.id, `${emp.name} checked out at ${L.fmt(t)}${note}.`);
+    const so = L.settingsOn(emp, rec.date), rl = await rules();
+    const early = (L.toMin(so.end) + (L.overnight(so) ? 1440 : 0)) - L.rel(t, so);
+    const workedMin = L.rel(t, so) - L.rel(rec.in, so);
+    if (so.flexible) {
+      if (workedMin < so.hours * 60 * rl.halfPct / 100) await addEvent('early', emp.id, `${emp.name} checked out after only ${Math.floor(workedMin / 60)} hr ${workedMin % 60} min on a flexible-hours day. This counts as an absence.`);
+    } else if (early > rl.earlyGrace) {
+      const earlyText = early >= 60 ? `${Math.floor(early / 60)} hr ${early % 60} min` : `${early} min`;
+      await addEvent('early', emp.id, `${emp.name} left ${earlyText} early (shift ends ${L.fmt(so.end)}). This counts as ${workedMin >= so.hours * 60 * rl.halfPct / 100 ? 'a half day' : 'an absence'}.`);
+    }
+    return { action: 'out', time: t };
+  }
+
   route('POST', '/api/punch', async ({ req, body: b }) => {
     const { dev, row, emp } = await employeeForDevice(req);
     need(emp, 'This phone is not approved for attendance.', 403);
@@ -784,50 +998,71 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     // Location: the pharmacy network, or the counter code when the phone is not on it.
     const here = await atShop(req);
     need(here || await codeValid(b.code), b.code ? 'That counter code is incorrect or has expired. Please enter the code currently shown at the counter.' : 'You are not connected to the pharmacy internet. Enter the counter code to record attendance.', 403);
-    // Identity: fingerprint or face unlock in the Haazir Android app, and/or the PIN, as set by the super admin.
-    const mode = await getSetting('mode', 'both');
-    const inApp = req.headers.get('x-haazir-app') === '1';
-    const bio = inApp && b.bio === true;
-    const pinNeeded = mode === 'both' || !bio;
-    if (mode === 'both' && inApp && !bio) need(b.bioUnavailable === true, 'Fingerprint or face verification is required.', 401);
-    if (pinNeeded) {
-      const pinRow = await one('SELECT pin_hash FROM employees WHERE id = ?', emp.id);
-      if (!checkSecret(String(b.pin || ''), pinRow.pin_hash)) {
-        const fails = Number(row.pin_fails) + 1;
-        await run('UPDATE devices SET pin_fails = ?, locked_until = ? WHERE id = ?', fails >= 5 ? 0 : fails, fails >= 5 ? Date.now() + 5 * 60 * 1000 : 0, dev.id);
-        throw new Fail(401, fails >= 5 ? 'Too many incorrect PINs. Please try again in 5 minutes.' : 'Incorrect PIN. Please try again.');
-      }
-      await run('UPDATE devices SET pin_fails = 0 WHERE id = ?', dev.id);
-    }
+    const { bio, pinNeeded } = await verifyIdentity(req, b, dev, row, emp, { allowPasskey: true });
     const method = (here ? 'Pharmacy network' : 'Counter Code') + (bio && pinNeeded ? ', fingerprint and PIN' : bio ? ', fingerprint' : ', PIN');
-    const T = L.today(), t = L.nowTime(), nowM = L.toMin(t);
-    const mine = (await all('SELECT * FROM attendance WHERE emp_key = ? AND date >= ?', emp.id, L.addDays(T, -1))).map(recOut);
-    const open = L.openRecord(emp, mine, T, nowM);
-    const shiftDate = open ? open.date : L.pickShiftDate(emp, nowM, T);
-    need(L.settingsOn(emp, shiftDate) && L.employed(emp, shiftDate), 'Your employment has not started yet.', 403);
-    const rec = open || mine.find(a => a.date === shiftDate);
-    if (!rec) {
-      await run('INSERT INTO attendance (emp_key, date, in_time, method, created_at) VALUES (?, ?, ?, ?, ?)', emp.id, shiftDate, t, method, L.stamp());
-      const s = L.settingsOn(emp, shiftDate), late = Math.max(0, L.rel(t, s) - L.toMin(s.start) - s.grace);
-      await addEvent('checkin', emp.id, `${emp.name} checked in at ${L.fmt(t)}.`);
-      const lateText = late >= 60 ? `${Math.floor(late / 60)} hr ${late % 60} min` : `${late} min`;
-      if (late > 0) await addEvent('late', emp.id, `${emp.name} arrived ${lateText} late. The shift started at ${L.fmt(s.start)}.`);
-      return { action: 'in', time: t };
+    return recordPunch(emp, Date.now(), method, false);
+  });
+
+  // Check-ins saved on the phone while it had no internet. Each must carry the counter code shown at that moment.
+  route('POST', '/api/punch/offline', async ({ req, body: b }) => {
+    const { dev, row, emp } = await employeeForDevice(req);
+    need(emp && !L.isGone(emp), 'This phone is not approved for attendance.', 403);
+    const items = (Array.isArray(b.items) ? b.items : []).slice(0, 20).sort((x, y) => Number(x.at) - Number(y.at));
+    const results = [];
+    for (const it of items) {
+      const id = String(it.id || '').slice(0, 64), ms = Number(it.at);
+      try {
+        need(id.length >= 8, 'Invalid saved check-in.');
+        if (await one('SELECT 1 AS x FROM offline_punches WHERE id = ?', id)) { results.push({ id, ok: true, duplicate: true }); continue; }
+        need(Number.isFinite(ms) && ms <= Date.now() + 120000 && ms >= Date.now() - 48 * 3600000, 'This saved check-in is too old to upload. Ask your admin to add it.');
+        need(Number(row.locked_until) < Date.now(), 'Too many incorrect PINs. Please try again in 5 minutes.', 429);
+        need(await codeValid(it.code, ms), 'The counter code saved with this check-in does not match the time it was recorded.', 403);
+        const { bio, pinNeeded } = await verifyIdentity(req, it, dev, row, emp, { allowPasskey: false });
+        const r = await recordPunch(emp, ms, 'Counter Code (saved offline)' + (bio && pinNeeded ? ', fingerprint and PIN' : bio ? ', fingerprint' : ', PIN'), true);
+        await run('INSERT INTO offline_punches (id, at) VALUES (?, ?)', id, L.stamp());
+        results.push({ id, ok: true, ...r });
+      } catch (e) {
+        if (!(e instanceof Fail)) throw e;
+        results.push({ id, ok: false, error: e.message, final: e.status !== 429 });
+      }
     }
-    need(!rec.out, 'Your shift is already complete.', 409);
-    await run('UPDATE attendance SET out_time = ? WHERE id = ?', t, rec.id);
-    await addEvent('checkout', emp.id, `${emp.name} checked out at ${L.fmt(t)}.`);
-    const so = L.settingsOn(emp, rec.date), rl = await rules();
-    const early = (L.toMin(so.end) + (L.overnight(so) ? 1440 : 0)) - L.rel(t, so);
-    const workedMin = L.rel(t, so) - L.rel(rec.in, so);
-    if (so.flexible) {
-      if (workedMin < so.hours * 60 * rl.halfPct / 100) await addEvent('early', emp.id, `${emp.name} checked out after only ${Math.floor(workedMin / 60)} hr ${workedMin % 60} min on a flexible-hours day. This counts as an absence.`);
-    } else if (early > rl.earlyGrace) {
-      const worked = workedMin;
-      const earlyText = early >= 60 ? `${Math.floor(early / 60)} hr ${early % 60} min` : `${early} min`;
-      await addEvent('early', emp.id, `${emp.name} left ${earlyText} early (shift ends ${L.fmt(so.end)}). This counts as ${worked >= so.hours * 60 * rl.halfPct / 100 ? 'a half day' : 'an absence'}.`);
-    }
-    return { action: 'out', time: t };
+    return { results };
+  });
+
+  /* ----- passkeys: fingerprint / Face ID in phone browsers (WebAuthn) ----- */
+  route('GET', '/api/passkey/challenge', async ({ req }) => {
+    const { dev, emp } = await employeeForDevice(req);
+    need(emp, 'This phone is not approved for attendance.', 403);
+    return { challenge: await makeChallenge(dev.id) };
+  });
+  route('POST', '/api/passkey/register', async ({ req, body: b }) => {
+    const { dev, emp } = await employeeForDevice(req);
+    need(emp && !L.isGone(emp), 'This phone is not approved for attendance.', 403);
+    const cred = await verifyRegistration(req, b, dev);
+    await run('DELETE FROM passkeys WHERE device_id = ?', dev.id);
+    await run('INSERT INTO passkeys (id, emp_id, device_id, rp_id, jwk, alg, sign_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', cred.id, emp.id, dev.id, cred.rpId, JSON.stringify(cred.jwk), cred.alg, cred.signCount, L.stamp());
+    await audit(`${emp.name} (${emp.id})`, 'Set up fingerprint / Face ID on their phone');
+    return { ok: true };
+  });
+  route('POST', '/api/passkey/remove', async ({ req }) => {
+    const { dev, emp } = await employeeForDevice(req);
+    need(emp, 'This phone is not approved for attendance.', 403);
+    await run('DELETE FROM passkeys WHERE device_id = ?', dev.id);
+    return { ok: true };
+  });
+
+  /* ----- browser notifications (Web Push) ----- */
+  route('GET', '/api/push/vapid', async () => ({ publicKey: (await vapidKeys()).publicKey }));
+  route('POST', '/api/push/web/register', async ({ req, body: b }) => {
+    const a = await requireAdmin(req);
+    const endpoint = String(b.endpoint || ''), keys = b.keys || {};
+    need(/^https:\/\//.test(endpoint) && endpoint.length < 2000 && keys.p256dh && keys.auth, 'Invalid notification subscription.');
+    await run('INSERT INTO webpush_subs (endpoint, username, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (endpoint) DO UPDATE SET username = excluded.username, p256dh = excluded.p256dh, auth = excluded.auth', endpoint, a.username, String(keys.p256dh), String(keys.auth), L.stamp());
+    return { ok: true };
+  });
+  route('POST', '/api/push/web/unregister', async ({ body: b }) => {
+    await run('DELETE FROM webpush_subs WHERE endpoint = ?', String(b.endpoint || ''));
+    return { ok: true };
   });
 
   // Employees change their own PIN (they must know the current one).
@@ -925,5 +1160,5 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     }
   }
 
-  return { handle, runJobs, routes };
+  return { handle, runJobs, routes, _test: { webPushEncrypt, cbor } };
 }

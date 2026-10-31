@@ -796,6 +796,41 @@ function Popups({ notif }) {
     </div>))}</div>;
 }
 
+// Notifications on this browser or iPhone, even when Haazir is closed (Web Push).
+function WebPushRow({ setMsg }) {
+  const [on, setOn] = useState(!!localStorage.getItem("hz_webpush")); const [busy, setBusy] = useState(false);
+  const turnOn = async () => {
+    setBusy(true); setMsg("");
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") throw new Error("Notifications are blocked for Haazir in this browser. Allow them in the browser's site settings, then try again.");
+      const reg = await navigator.serviceWorker.register("sw.js"); await navigator.serviceWorker.ready;
+      const { publicKey } = await api("/api/push/vapid");
+      const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBytes(publicKey) });
+      const j = sub.toJSON();
+      await api("/api/push/web/register", { endpoint: j.endpoint, keys: j.keys });
+      localStorage.setItem("hz_webpush", j.endpoint); setOn(true);
+    } catch (e) { setMsg(e.message || "Notifications could not be turned on in this browser."); }
+    setBusy(false);
+  };
+  const turnOff = async () => {
+    setBusy(true);
+    try {
+      const reg = await navigator.serviceWorker.getRegistration("sw.js"); const sub = reg && await reg.pushManager.getSubscription();
+      const ep = (sub && sub.endpoint) || localStorage.getItem("hz_webpush");
+      if (sub) await sub.unsubscribe(); if (ep) await api("/api/push/web/unregister", { endpoint: ep });
+    } catch { /* ignore */ }
+    localStorage.removeItem("hz_webpush"); setOn(false); setBusy(false);
+  };
+  const text = !webPushSupported() ? (isIos() && !isStandalone() ? "On iPhone: open Haazir in Safari, tap Share → Add to Home Screen, open Haazir from the home screen, then turn this on." : "This browser cannot receive notifications when Haazir is closed.")
+    : isIos() && !isStandalone() ? "On iPhone: tap Share → Add to Home Screen, open Haazir from the home screen, then turn this on."
+    : on ? "On: notifications arrive on this device even when Haazir is closed. The choices above apply." : "Get notifications on this device even when Haazir is closed.";
+  return (
+    <div className="switchrow" style={{ cursor: "default" }}><span><b>Notifications on This Device</b><small>{text}</small></span>
+      {webPushSupported() && !(isIos() && !isStandalone()) && (on ? <button className="btn small" disabled={busy} onClick={turnOff}>Turn Off</button> : <button className="btn small primary" disabled={busy} onClick={turnOn}>Turn On</button>)}</div>
+  );
+}
+
 function NotifySettings({ db, act, notif }) {
   const [p, setP] = useState({ ...db.me.notify }); const [msg, setMsg] = useState("");
   const toggle = k => setP({ ...p, [k]: !p[k] });
@@ -815,10 +850,10 @@ function NotifySettings({ db, act, notif }) {
           <input type="checkbox" className="switch" checked={p[k] !== false && (p[k] !== undefined || k === "pinreset" || k === "early" || k === "laterequest")} onChange={() => setP({ ...p, [k]: !(p[k] !== false && (p[k] !== undefined || k === "pinreset" || k === "early" || k === "laterequest")) })} /></label>)}
         <label className="switchrow"><span><b>Notification Tone</b><small>Play a short tone when a new notification arrives.</small></span>
           <input type="checkbox" className="switch" checked={p.sound !== false} onChange={() => setP({ ...p, sound: p.sound === false })} /></label>
-        <label className="switchrow"><span><b>Device Notifications</b><small>Also show notifications on this device while Haazir is open in the background.</small></span>
-          <input type="checkbox" className="switch" checked={!!p.device} onChange={toggleDevice} /></label>
-        <div className="switchrow" style={{ cursor: "default" }}><span><b>Phone Notifications</b><small>{!db.push || !db.push.configured ? "Not set up yet. A super admin sets them up under Admins & Security." : db.push.myDevices ? `On for ${db.push.myDevices} phone${db.push.myDevices === 1 ? "" : "s"}. They arrive even when Haazir is closed, with the Haazir tone. The choices above apply.` : "Open the Admin Dashboard in the Haazir Android app and allow notifications when asked."}</small></span>
-          {db.push && db.push.configured && db.push.myDevices > 0 && <button className="btn small" onClick={() => act("/api/push/test", {}, setMsg)}>Send Test</button>}</div>
+        {!inAndroidApp() && <WebPushRow setMsg={setMsg} />}
+        {inAndroidApp() && <div className="switchrow" style={{ cursor: "default" }}><span><b>Phone Notifications</b><small>{!db.push || !db.push.configured ? "Not set up yet. A super admin sets them up under Admins & Security." : db.push.myDevices ? `On for ${db.push.myDevices} phone${db.push.myDevices === 1 ? "" : "s"}. They arrive even when Haazir is closed, with the Haazir tone. The choices above apply.` : "Open the Admin Dashboard in the Haazir Android app and allow notifications when asked."}</small></span>
+          </div>}
+        {db.push && (db.push.myDevices > 0 || db.push.myBrowsers > 0) && <div className="row" style={{ marginTop: 10 }}><button className="btn small" onClick={() => act("/api/push/test", {}, setMsg)}>Send Test Notification</button></div>}
         {msg && <div className="notice" style={{ marginTop: 10 }}>{msg}</div>}
         <div className="row" style={{ marginTop: 16, justifyContent: "flex-end" }}><button className="btn" onClick={notif.closeSettings}>Cancel</button><button className="btn primary" onClick={save}>Save Settings</button></div>
       </div>
@@ -1042,9 +1077,9 @@ function AdminApp() {
     catch (e) { if (e.status === 401) { setPhase("login"); return false; } if (setErr) setErr(e.message); else showToast(e.message, true); return false; }
   };
   const signOut = async () => {
-    const fcm = localStorage.getItem("hz_fcm");
-    try { if (fcm) await api("/api/push/unregister", { token: fcm }); await api("/api/logout", {}); } catch { /* ignore */ }
-    localStorage.removeItem("hz_token"); localStorage.removeItem("hz_fcm"); setDb(null); setPhase("login");
+    const fcm = localStorage.getItem("hz_fcm"), wp = localStorage.getItem("hz_webpush");
+    try { if (fcm) await api("/api/push/unregister", { token: fcm }); if (wp) await api("/api/push/web/unregister", { endpoint: wp }); await api("/api/logout", {}); } catch { /* ignore */ }
+    localStorage.removeItem("hz_token"); localStorage.removeItem("hz_fcm"); localStorage.removeItem("hz_webpush"); setDb(null); setPhase("login");
   };
   // In the Haazir Android app, register this phone for notifications once the admin is signed in.
   useEffect(() => {

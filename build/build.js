@@ -12,6 +12,8 @@ function build(entry, out) {
 }
 build('admin.jsx', 'admin/admin.js');
 build('app.jsx', 'app/app.js');
+// The employee app's offline copy (service worker), named after the version.
+fs.writeFileSync(path.join(__dirname, '../web/app/sw.js'), fs.readFileSync(path.join(__dirname, '../src/app-sw.js'), 'utf8').replace(/__VERSION__/g, version));
 // Add ?v=<version> to the script addresses so browsers download the new files after every update.
 for (const page of ['admin/index.html', 'app/index.html']) {
   const f = path.join(__dirname, '../web', page);
