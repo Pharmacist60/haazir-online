@@ -624,6 +624,27 @@ function TrackingStart({ db, act }) {
   );
 }
 
+function PushSetup({ db, act }) {
+  const [err, setErr] = useState(""); const project = db.push && db.push.configured;
+  const upload = async e => {
+    const file = e.target.files[0]; e.target.value = ""; if (!file) return;
+    setErr(""); await act("/api/push/config", { json: await file.text() }, setErr);
+  };
+  return (
+    <div className="panel">
+      <h2>Phone Notifications</h2>
+      {project ? <p>Set up with Firebase project <b>{project}</b>. Admins receive notifications on their phones, even when Haazir is closed, once they open the Admin Dashboard in the Haazir Android app and allow notifications.</p>
+        : <p>Send notifications to admins' phones through Firebase Cloud Messaging (free). Upload the Firebase <b>service account key</b> file: in the Firebase console, open <b>Project settings → Service accounts → Generate new private key</b>. Do this on a computer.</p>}
+      <div className="row" style={{ alignItems: "center" }}>
+        <label className="btn" style={{ cursor: "pointer" }}><Upload size={16} /> {project ? "Replace Key File" : "Upload Key File"}<input type="file" accept=".json,application/json" onChange={upload} style={{ display: "none" }} /></label>
+        {project && <button className="btn danger" onClick={() => { if (confirm("Switch off phone notifications for everyone?")) act("/api/push/remove", {}); }}>Switch Off</button>}
+      </div>
+      <p className="muted" style={{ fontSize: 13, marginTop: 10 }}>The key is stored only in your Haazir database. It is never included in downloaded backups. Keep the downloaded key file private.</p>
+      {err && <div className="err">{err}</div>}
+    </div>
+  );
+}
+
 function EarlyRules({ db, act }) {
   const r = db.rules || { earlyGrace: 15, halfPct: 50 };
   const [g, setG] = useState(r.earlyGrace); const [h, setH] = useState(r.halfPct); const [err, setErr] = useState("");
@@ -654,6 +675,7 @@ function Access({ db, act }) {
   return (
     <>
       <h1>Admins & Security</h1>
+      <PushSetup db={db} act={act} />
       <EarlyRules db={db} act={act} />
       <div className="panel">
         <h2>Check-In Verification</h2>
@@ -794,6 +816,8 @@ function NotifySettings({ db, act, notif }) {
           <input type="checkbox" className="switch" checked={p.sound !== false} onChange={() => setP({ ...p, sound: p.sound === false })} /></label>
         <label className="switchrow"><span><b>Device Notifications</b><small>Also show notifications on this device while Haazir is open in the background.</small></span>
           <input type="checkbox" className="switch" checked={!!p.device} onChange={toggleDevice} /></label>
+        <div className="switchrow" style={{ cursor: "default" }}><span><b>Phone Notifications</b><small>{!db.push || !db.push.configured ? "Not set up yet. A super admin sets them up under Admins & Security." : db.push.myDevices ? `On for ${db.push.myDevices} phone${db.push.myDevices === 1 ? "" : "s"}. They arrive even when Haazir is closed, with the Haazir tone. The choices above apply.` : "Open the Admin Dashboard in the Haazir Android app and allow notifications when asked."}</small></span>
+          {db.push && db.push.configured && db.push.myDevices > 0 && <button className="btn small" onClick={() => act("/api/push/test", {}, setMsg)}>Send Test</button>}</div>
         {msg && <div className="notice" style={{ marginTop: 10 }}>{msg}</div>}
         <div className="row" style={{ marginTop: 16, justifyContent: "flex-end" }}><button className="btn" onClick={notif.closeSettings}>Cancel</button><button className="btn primary" onClick={save}>Save Settings</button></div>
       </div>
@@ -1005,6 +1029,7 @@ function AdminApp() {
     "/api/admins/add": "Admin added.", "/api/admins/remove": "Admin removed.", "/api/admins/reset": "Password reset.",
     "/api/password": "Your password has been changed.", "/api/notify/prefs": "Notification settings saved.",
     "/api/counter/reset": "Counter code reset. Set up the counter displays again.", "/api/admin/punch": "Attendance recorded.",
+    "/api/push/config": "Phone notifications set up.", "/api/push/remove": "Phone notifications switched off.", "/api/push/test": "Test notification sent. Check your phone.",
   };
   const act = async (path, body, setErr) => {
     try {
@@ -1015,7 +1040,22 @@ function AdminApp() {
     }
     catch (e) { if (e.status === 401) { setPhase("login"); return false; } if (setErr) setErr(e.message); else showToast(e.message, true); return false; }
   };
-  const signOut = async () => { try { await api("/api/logout", {}); } catch { /* ignore */ } localStorage.removeItem("hz_token"); setDb(null); setPhase("login"); };
+  const signOut = async () => {
+    const fcm = localStorage.getItem("hz_fcm");
+    try { if (fcm) await api("/api/push/unregister", { token: fcm }); await api("/api/logout", {}); } catch { /* ignore */ }
+    localStorage.removeItem("hz_token"); localStorage.removeItem("hz_fcm"); setDb(null); setPhase("login");
+  };
+  // In the Haazir Android app, register this phone for notifications once the admin is signed in.
+  useEffect(() => {
+    if (phase !== "ready" || !inAndroidApp() || !db || !db.push || !db.push.configured) return;
+    let done = false;
+    const t = setTimeout(() => { done = true; }, 15000);
+    askApp({ type: "fcm" }, "hzAppFcm").then(async ([token]) => {
+      clearTimeout(t); if (done || !token) return;
+      try { await api("/api/push/register", { token }); localStorage.setItem("hz_fcm", token); } catch { /* try again next time */ }
+    });
+    return () => clearTimeout(t);
+  }, [phase, db && db.push && db.push.configured]);
   const notif = useNotifications(phase === "ready" ? db : null, setPhase, () => load());
   const serverVersion = useServerVersion();
   return (

@@ -5,7 +5,7 @@ import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
 import * as L from './logic.js';
 
-export const VERSION = '1.12.0';
+export const VERSION = '1.13.0';
 
 /* ---------------- database layout ---------------- */
 // Every table, with its columns. Used to create the database, and to back up and restore it.
@@ -42,6 +42,7 @@ function schema(dialect) {
     `CREATE TABLE IF NOT EXISTS audit (id ${ID}, at TEXT NOT NULL, by_user TEXT NOT NULL, what TEXT NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, username TEXT NOT NULL, expires_at ${REAL} NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS events (id ${ID}, at_ms ${REAL} NOT NULL, at TEXT NOT NULL, type TEXT NOT NULL, emp_id TEXT, text TEXT NOT NULL, uniq TEXT UNIQUE)`,
+    `CREATE TABLE IF NOT EXISTS push_tokens (token TEXT PRIMARY KEY, username TEXT NOT NULL, created_at TEXT NOT NULL, last_seen TEXT NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS backups (id ${ID}, created_ms ${REAL} NOT NULL, created_at TEXT NOT NULL, kind TEXT NOT NULL, size INTEGER NOT NULL, data TEXT NOT NULL)`,
   ];
 }
@@ -72,7 +73,7 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
 /* ---------------- the API ---------------- */
 // db: { dialect, all(sql, params), exec(sql), tx(async t => ...) }   (t has all())
-export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allowOrigin = '*' }) {
+export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allowOrigin = '*', fetchFn = (...a) => fetch(...a) }) {
   L.setTimeZone(timeZone);
   const all = (sql, ...p) => db.all(sql, p);
   const one = async (sql, ...p) => (await db.all(sql, p))[0] || null;
@@ -186,7 +187,50 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   async function addEvent(type, empId, text, uniq = null) {
     if (uniq && await one('SELECT 1 AS x FROM events WHERE uniq = ?', uniq)) return;
     try { await run('INSERT INTO events (at_ms, at, type, emp_id, text, uniq) VALUES (?, ?, ?, ?, ?, ?)', Date.now(), L.stamp(), type, empId, text, uniq); }
-    catch (e) { if (!/unique|duplicate/i.test(e.message)) throw e; }
+    catch (e) { if (!/unique|duplicate/i.test(e.message)) throw e; return; }
+    await pushEvent(type, text).catch(e => console.error('Phone notification failed:', e.message));
+  }
+
+  /* ----- phone notifications (Firebase Cloud Messaging) ----- */
+  const NOTE_TITLES = { checkin: 'Check-In', checkout: 'Check-Out', late: 'Late Arrival', absent: 'Not Checked In', overleave: 'Beyond Allowed Leaves', early: 'Left Early', pinreset: 'PIN Reset Request' };
+  let fcmToken = null;
+  async function fcmAccess(sa) {
+    if (fcmToken && fcmToken.project === sa.project_id && fcmToken.until > Date.now()) return fcmToken.value;
+    const b64 = o => Buffer.from(typeof o === 'string' ? o : JSON.stringify(o)).toString('base64url');
+    const now = Math.floor(Date.now() / 1000);
+    const head = b64({ alg: 'RS256', typ: 'JWT' }) + '.' + b64({ iss: sa.client_email, scope: 'https://www.googleapis.com/auth/firebase.messaging', aud: sa.token_uri || 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600 });
+    const jwt = head + '.' + crypto.createSign('RSA-SHA256').update(head).sign(sa.private_key).toString('base64url');
+    const r = await fetchFn(sa.token_uri || 'https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: jwt }).toString() });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.access_token) throw new Error('Firebase sign-in failed: ' + (j.error_description || j.error || r.status));
+    fcmToken = { project: sa.project_id, value: j.access_token, until: Date.now() + 50 * 60000 };
+    return j.access_token;
+  }
+  async function fcmSend(sa, token, title, body, type) {
+    const access = await fcmAccess(sa);
+    const r = await fetchFn(`https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`, {
+      method: 'POST', headers: { Authorization: 'Bearer ' + access, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: { token, notification: { title, body }, data: { type: type || '', open: 'admin' },
+        android: { priority: 'high', notification: { channel_id: 'haazir_alerts', sound: 'haazir_tone', icon: 'ic_stat_haazir', color: '#0F1561' } } } }),
+    });
+    if (r.ok) return 'sent';
+    const j = await r.json().catch(() => ({}));
+    const status = (j.error && j.error.status) || '';
+    if (r.status === 404 || status === 'NOT_FOUND' || status === 'UNREGISTERED' || (status === 'INVALID_ARGUMENT' && /token/i.test(JSON.stringify(j)))) { await run('DELETE FROM push_tokens WHERE token = ?', token); return 'removed'; }
+    throw new Error('Firebase rejected the notification: ' + ((j.error && j.error.message) || r.status));
+  }
+  async function pushTo(rows, title, body, type) {
+    const raw = await getSetting('fcm_sa'); if (!raw || !rows.length) return { sent: 0, failed: 0 };
+    const sa = JSON.parse(raw); let sent = 0, failed = 0;
+    await Promise.all(rows.map(async r => { try { if ((await fcmSend(sa, r.token, title, body, type)) === 'sent') sent++; } catch (e) { failed++; console.error(e.message); } }));
+    return { sent, failed };
+  }
+  // Each admin receives the types they have switched on in Notification Settings.
+  async function pushEvent(type, text) {
+    if (!(await getSetting('fcm_sa'))) return;
+    const rows = await all('SELECT p.token, a.notify FROM push_tokens p JOIN admins a ON a.username = p.username');
+    const wanted = rows.filter(r => { try { return JSON.parse(r.notify)[type] !== false; } catch { return true; } });
+    await pushTo(wanted, 'Haazir: ' + (NOTE_TITLES[type] || 'Notification'), text, type);
   }
   async function priorAbsences(e, date) {
     const start = await trackingStartDate();
@@ -223,6 +267,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   async function exportData() {
     const tables = {};
     for (const t of Object.keys(TABLES)) tables[t] = await all(`SELECT ${TABLES[t].join(', ')} FROM ${t}`);
+    tables.settings = tables.settings.filter(r => r.key !== 'fcm_sa');
     return { app: 'haazir', format: 1, version: VERSION, created: L.stamp(), tables };
   }
   async function saveBackup(kind) {
@@ -244,7 +289,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     const info = checkBackup(data);
     await saveBackup('Before restore');
     // The database timer's own settings belong to this Supabase project, not to the backup.
-    const keep = await all("SELECT key, value FROM settings WHERE key IN ('cron_key', 'cron')");
+    const keep = await all("SELECT key, value FROM settings WHERE key IN ('cron_key', 'cron', 'fcm_sa')");
     await db.tx(async t => {
       const q = (sql, ...p) => t.all(sql, p);
       for (const name of Object.keys(TABLES)) await q(`DELETE FROM ${name}`);
@@ -353,6 +398,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
       audit: sup ? await all('SELECT at, by_user AS by, what FROM audit ORDER BY id DESC LIMIT 500') : [],
       cron: sup ? await getSetting('cron', '') : '',
       trackingStart, rules: await rules(),
+      push: { configured: sup ? ((JSON.parse((await getSetting('fcm_sa')) || 'null') || {}).project_id || null) : !!(await getSetting('fcm_sa')), myDevices: Number((await one('SELECT CAST(COUNT(*) AS INTEGER) AS n FROM push_tokens WHERE username = ?', a.username)).n) },
     };
   });
 
@@ -542,6 +588,42 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     await setSetting('tracking_start', b.date);
     await audit(adminLabel(a), `Set the attendance tracking start date to ${L.longDate(b.date)}`);
     return { ok: true };
+  });
+  // Phone notifications: the super admin uploads the Firebase service account key once.
+  route('POST', '/api/push/config', async ({ req, body: b }) => {
+    const a = await requireAdmin(req, true);
+    let sa; try { sa = JSON.parse(String(b.json || '')); } catch { throw new Fail(400, 'This is not a valid Firebase key file.'); }
+    need(sa && sa.type === 'service_account' && sa.project_id && sa.client_email && sa.private_key, 'This is not a Firebase service account key file. In Firebase, open Project settings → Service accounts → Generate new private key.');
+    fcmToken = null;
+    try { await fcmAccess(sa); } catch (e) { throw new Fail(400, 'Firebase did not accept this key: ' + e.message); }
+    await setSetting('fcm_sa', JSON.stringify({ type: sa.type, project_id: sa.project_id, client_email: sa.client_email, private_key: sa.private_key, token_uri: sa.token_uri }));
+    await audit(adminLabel(a), `Set up phone notifications for Firebase project ${sa.project_id}`);
+    return { ok: true, project: sa.project_id };
+  });
+  route('POST', '/api/push/remove', async ({ req }) => {
+    const a = await requireAdmin(req, true);
+    await run("DELETE FROM settings WHERE key = 'fcm_sa'");
+    await audit(adminLabel(a), 'Switched off phone notifications (removed the Firebase key)');
+    return { ok: true };
+  });
+  route('POST', '/api/push/register', async ({ req, body: b }) => {
+    const a = await requireAdmin(req);
+    const token = String(b.token || ''); need(token.length > 20 && token.length < 4096, 'Invalid notification token.');
+    await run('INSERT INTO push_tokens (token, username, created_at, last_seen) VALUES (?, ?, ?, ?) ON CONFLICT (token) DO UPDATE SET username = excluded.username, last_seen = excluded.last_seen', token, a.username, L.stamp(), L.stamp());
+    return { ok: true };
+  });
+  route('POST', '/api/push/unregister', async ({ body: b }) => {
+    await run('DELETE FROM push_tokens WHERE token = ?', String(b.token || ''));
+    return { ok: true };
+  });
+  route('POST', '/api/push/test', async ({ req }) => {
+    const a = await requireAdmin(req);
+    need(await getSetting('fcm_sa'), 'Phone notifications are not set up yet. A super admin sets them up under Admins & Security.');
+    const rows = await all('SELECT token FROM push_tokens WHERE username = ?', a.username);
+    need(rows.length, 'No phone is registered for your account yet. Open the Admin Dashboard in the Haazir Android app and allow notifications.');
+    const r = await pushTo(rows, 'Haazir: Test', `This is a test notification for ${a.name}. Phone notifications are working.`, 'test');
+    need(r.sent > 0, 'The test notification could not be sent. Check the Firebase setup.', 502);
+    return { ok: true, ...r };
   });
   route('POST', '/api/settings/rules', async ({ req, body: b }) => {
     const a = await requireAdmin(req, true);

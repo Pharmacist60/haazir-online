@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.12.0";
+const APP_VERSION = "1.13.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -1814,6 +1814,40 @@ function TrackingStart({ db, act }) {
             React.createElement("button", { className: "btn primary", disabled: d === db.trackingStart, onClick: () => act("/api/settings/tracking", { date: d }, setErr) }, "Save Date")),
         err && React.createElement("div", { className: "err" }, err)));
 }
+function PushSetup({ db, act }) {
+    const [err, setErr] = useState("");
+    const project = db.push && db.push.configured;
+    const upload = async (e) => {
+        const file = e.target.files[0];
+        e.target.value = "";
+        if (!file)
+            return;
+        setErr("");
+        await act("/api/push/config", { json: await file.text() }, setErr);
+    };
+    return (React.createElement("div", { className: "panel" },
+        React.createElement("h2", null, "Phone Notifications"),
+        project ? React.createElement("p", null,
+            "Set up with Firebase project ",
+            React.createElement("b", null, project),
+            ". Admins receive notifications on their phones, even when Haazir is closed, once they open the Admin Dashboard in the Haazir Android app and allow notifications.")
+            : React.createElement("p", null,
+                "Send notifications to admins' phones through Firebase Cloud Messaging (free). Upload the Firebase ",
+                React.createElement("b", null, "service account key"),
+                " file: in the Firebase console, open ",
+                React.createElement("b", null, "Project settings \u2192 Service accounts \u2192 Generate new private key"),
+                ". Do this on a computer."),
+        React.createElement("div", { className: "row", style: { alignItems: "center" } },
+            React.createElement("label", { className: "btn", style: { cursor: "pointer" } },
+                React.createElement(Upload, { size: 16 }),
+                " ",
+                project ? "Replace Key File" : "Upload Key File",
+                React.createElement("input", { type: "file", accept: ".json,application/json", onChange: upload, style: { display: "none" } })),
+            project && React.createElement("button", { className: "btn danger", onClick: () => { if (confirm("Switch off phone notifications for everyone?"))
+                    act("/api/push/remove", {}); } }, "Switch Off")),
+        React.createElement("p", { className: "muted", style: { fontSize: 13, marginTop: 10 } }, "The key is stored only in your Haazir database. It is never included in downloaded backups. Keep the downloaded key file private."),
+        err && React.createElement("div", { className: "err" }, err)));
+}
 function EarlyRules({ db, act }) {
     const r = db.rules || { earlyGrace: 15, halfPct: 50 };
     const [g, setG] = useState(r.earlyGrace);
@@ -1855,6 +1889,7 @@ function Access({ db, act }) {
         act("/api/admins/reset", { username: a.username, password: pw }); };
     return (React.createElement(React.Fragment, null,
         React.createElement("h1", null, "Admins & Security"),
+        React.createElement(PushSetup, { db: db, act: act }),
         React.createElement(EarlyRules, { db: db, act: act }),
         React.createElement("div", { className: "panel" },
             React.createElement("h2", null, "Check-In Verification"),
@@ -2060,6 +2095,11 @@ function NotifySettings({ db, act, notif }) {
                     React.createElement("b", null, "Device Notifications"),
                     React.createElement("small", null, "Also show notifications on this device while Haazir is open in the background.")),
                 React.createElement("input", { type: "checkbox", className: "switch", checked: !!p.device, onChange: toggleDevice })),
+            React.createElement("div", { className: "switchrow", style: { cursor: "default" } },
+                React.createElement("span", null,
+                    React.createElement("b", null, "Phone Notifications"),
+                    React.createElement("small", null, !db.push || !db.push.configured ? "Not set up yet. A super admin sets them up under Admins & Security." : db.push.myDevices ? `On for ${db.push.myDevices} phone${db.push.myDevices === 1 ? "" : "s"}. They arrive even when Haazir is closed, with the Haazir tone. The choices above apply.` : "Open the Admin Dashboard in the Haazir Android app and allow notifications when asked.")),
+                db.push && db.push.configured && db.push.myDevices > 0 && React.createElement("button", { className: "btn small", onClick: () => act("/api/push/test", {}, setMsg) }, "Send Test")),
             msg && React.createElement("div", { className: "notice", style: { marginTop: 10 } }, msg),
             React.createElement("div", { className: "row", style: { marginTop: 16, justifyContent: "flex-end" } },
                 React.createElement("button", { className: "btn", onClick: notif.closeSettings }, "Cancel"),
@@ -2386,6 +2426,7 @@ function AdminApp() {
         "/api/admins/add": "Admin added.", "/api/admins/remove": "Admin removed.", "/api/admins/reset": "Password reset.",
         "/api/password": "Your password has been changed.", "/api/notify/prefs": "Notification settings saved.",
         "/api/counter/reset": "Counter code reset. Set up the counter displays again.", "/api/admin/punch": "Attendance recorded.",
+        "/api/push/config": "Phone notifications set up.", "/api/push/remove": "Phone notifications switched off.", "/api/push/test": "Test notification sent. Check your phone.",
     };
     const act = async (path, body, setErr) => {
         try {
@@ -2408,10 +2449,37 @@ function AdminApp() {
             return false;
         }
     };
-    const signOut = async () => { try {
-        await api("/api/logout", {});
-    }
-    catch { /* ignore */ } localStorage.removeItem("hz_token"); setDb(null); setPhase("login"); };
+    const signOut = async () => {
+        const fcm = localStorage.getItem("hz_fcm");
+        try {
+            if (fcm)
+                await api("/api/push/unregister", { token: fcm });
+            await api("/api/logout", {});
+        }
+        catch { /* ignore */ }
+        localStorage.removeItem("hz_token");
+        localStorage.removeItem("hz_fcm");
+        setDb(null);
+        setPhase("login");
+    };
+    // In the Haazir Android app, register this phone for notifications once the admin is signed in.
+    useEffect(() => {
+        if (phase !== "ready" || !inAndroidApp() || !db || !db.push || !db.push.configured)
+            return;
+        let done = false;
+        const t = setTimeout(() => { done = true; }, 15000);
+        askApp({ type: "fcm" }, "hzAppFcm").then(async ([token]) => {
+            clearTimeout(t);
+            if (done || !token)
+                return;
+            try {
+                await api("/api/push/register", { token });
+                localStorage.setItem("hz_fcm", token);
+            }
+            catch { /* try again next time */ }
+        });
+        return () => clearTimeout(t);
+    }, [phase, db && db.push && db.push.configured]);
     const notif = useNotifications(phase === "ready" ? db : null, setPhase, () => load());
     const serverVersion = useServerVersion();
     return (React.createElement(React.Fragment, null,
