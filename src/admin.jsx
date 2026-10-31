@@ -730,6 +730,7 @@ const NOTE_TYPES = [
   ["overleave", "Beyond Allowed Leaves", "When an absent employee has already used all paid leaves for the month.", " red"],
   ["early", "Left Early", "When an employee checks out before the shift ends, beyond the early leave grace period.", " amber"],
   ["pinreset", "PIN Reset Request", "When an employee forgets their PIN and asks for a new one.", " amber"],
+  ["laterequest", "Late Entry Request", "When an employee asks for a missed check-in or check-out to be added.", " amber"],
 ];
 const noteLabel = t => (NOTE_TYPES.find(n => n[0] === t) || [t, t])[1];
 const noteTag = t => (NOTE_TYPES.find(n => n[0] === t) || [, , , ""])[3];
@@ -811,7 +812,7 @@ function NotifySettings({ db, act, notif }) {
         <h2 id="nstitle">Notification Settings</h2>
         <p className="muted">Choose which pop-ups you receive. These settings apply to your account only.</p>
         {NOTE_TYPES.map(([k, t, d]) => <label key={k} className="switchrow"><span><b>{t}</b><small>{d}</small></span>
-          <input type="checkbox" className="switch" checked={p[k] !== false && (p[k] !== undefined || k === "pinreset" || k === "early")} onChange={() => setP({ ...p, [k]: !(p[k] !== false && (p[k] !== undefined || k === "pinreset" || k === "early")) })} /></label>)}
+          <input type="checkbox" className="switch" checked={p[k] !== false && (p[k] !== undefined || k === "pinreset" || k === "early" || k === "laterequest")} onChange={() => setP({ ...p, [k]: !(p[k] !== false && (p[k] !== undefined || k === "pinreset" || k === "early" || k === "laterequest")) })} /></label>)}
         <label className="switchrow"><span><b>Notification Tone</b><small>Play a short tone when a new notification arrives.</small></span>
           <input type="checkbox" className="switch" checked={p.sound !== false} onChange={() => setP({ ...p, sound: p.sound === false })} /></label>
         <label className="switchrow"><span><b>Device Notifications</b><small>Also show notifications on this device while Haazir is open in the background.</small></span>

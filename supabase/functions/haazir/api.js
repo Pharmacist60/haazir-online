@@ -5,7 +5,7 @@ import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
 import * as L from './logic.js';
 
-export const VERSION = '1.13.0';
+export const VERSION = '1.14.0';
 
 /* ---------------- database layout ---------------- */
 // Every table, with its columns. Used to create the database, and to back up and restore it.
@@ -183,7 +183,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   }
 
   /* ----- notifications ----- */
-  const EVENT_TYPES = ['checkin', 'checkout', 'late', 'absent', 'overleave', 'early', 'pinreset'];
+  const EVENT_TYPES = ['checkin', 'checkout', 'late', 'absent', 'overleave', 'early', 'pinreset', 'laterequest'];
   async function addEvent(type, empId, text, uniq = null) {
     if (uniq && await one('SELECT 1 AS x FROM events WHERE uniq = ?', uniq)) return;
     try { await run('INSERT INTO events (at_ms, at, type, emp_id, text, uniq) VALUES (?, ?, ?, ?, ?, ?)', Date.now(), L.stamp(), type, empId, text, uniq); }
@@ -192,7 +192,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   }
 
   /* ----- phone notifications (Firebase Cloud Messaging) ----- */
-  const NOTE_TITLES = { checkin: 'Check-In', checkout: 'Check-Out', late: 'Late Arrival', absent: 'Not Checked In', overleave: 'Beyond Allowed Leaves', early: 'Left Early', pinreset: 'PIN Reset Request' };
+  const NOTE_TITLES = { checkin: 'Check-In', checkout: 'Check-Out', late: 'Late Arrival', absent: 'Not Checked In', overleave: 'Beyond Allowed Leaves', early: 'Left Early', pinreset: 'PIN Reset Request', laterequest: 'Late Entry Request' };
   let fcmToken = null;
   async function fcmAccess(sa) {
     if (fcmToken && fcmToken.project === sa.project_id && fcmToken.until > Date.now()) return fcmToken.value;
@@ -696,7 +696,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   });
   route('POST', '/api/notify/prefs', async ({ req, body: b }) => {
     const a = await requireAdmin(req);
-    const prefs = Object.fromEntries([...EVENT_TYPES, 'device', 'sound'].map(k => [k, b[k] === undefined ? (k === 'pinreset' || k === 'early') : !!b[k]]));
+    const prefs = Object.fromEntries([...EVENT_TYPES, 'device', 'sound'].map(k => [k, b[k] === undefined ? (k === 'pinreset' || k === 'early' || k === 'laterequest') : !!b[k]]));
     await run('UPDATE admins SET notify = ? WHERE username = ?', JSON.stringify(prefs), a.username);
     return { ok: true };
   });
@@ -873,6 +873,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     const reason = String(b.reason || '').trim().slice(0, 300); need(reason, 'Please provide a reason.');
     need(!(await one("SELECT 1 AS x FROM late_requests WHERE emp_id = ? AND date = ? AND status = 'pending'", emp.id, b.date)), 'A request for this date is already pending.', 409);
     await run('INSERT INTO late_requests (emp_id, date, in_time, out_time, reason, submitted_at) VALUES (?, ?, ?, ?, ?, ?)', emp.id, b.date, inT, b.out || null, reason, L.stamp());
+    await addEvent('laterequest', emp.id, `${emp.name} asked for a late entry on ${L.niceDate(b.date)}: ${existing ? 'check-out' : 'check-in ' + L.fmt(inT)}${b.out ? ' – ' + L.fmt(b.out) : ''}. Approve it under Late Entries.`);
     return { ok: true };
   });
 

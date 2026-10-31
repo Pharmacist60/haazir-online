@@ -169,6 +169,8 @@ function Home({ st, reload }) {
   const s = settingsOn(emp, shiftDate);
   const rec = open || st.attendance.find(a => a.date === shiftDate);
   const action = !rec ? "in" : !rec.out ? "out" : null;
+  // A missed check-in request for this shift that an admin has not decided yet.
+  const pendingIn = !rec && st.lateReqs.find(r => r.date === shiftDate && r.status === "pending");
   const isOff = s && s.off.includes(weekday(shiftDate));
   const recent = st.attendance.filter(a => a.date < TODAY && a.id !== rec?.id).slice(-4).reverse();
 
@@ -237,7 +239,14 @@ function Home({ st, reload }) {
             </div>
           )}
           {msg && <div className="notice"><Wifi size={16} />{msg}</div>}
-          {action ? (
+          {pendingIn ? (
+            <div className="sheet pop">
+              <Clock size={34} color="#0F1561" />
+              <h3>Check-In Request Pending</h3>
+              <p>Your request to record your check-in at {fmt(pendingIn.in)} is waiting for an admin. Once it is approved, the <b>Check Out</b> button appears here so you can check out at the end of your shift.</p>
+              <button className="btn block" onClick={reload}>Check Again</button>
+            </div>
+          ) : action ? (
             <button className={"punch" + (action === "out" ? " out" : "")} onClick={start}>
               <span className="cross" />{action === "in" ? "Check In" : "Check Out"}
             </button>

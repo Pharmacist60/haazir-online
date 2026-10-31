@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.13.0";
+const APP_VERSION = "1.14.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -1966,6 +1966,7 @@ const NOTE_TYPES = [
     ["overleave", "Beyond Allowed Leaves", "When an absent employee has already used all paid leaves for the month.", " red"],
     ["early", "Left Early", "When an employee checks out before the shift ends, beyond the early leave grace period.", " amber"],
     ["pinreset", "PIN Reset Request", "When an employee forgets their PIN and asks for a new one.", " amber"],
+    ["laterequest", "Late Entry Request", "When an employee asks for a missed check-in or check-out to be added.", " amber"],
 ];
 const noteLabel = t => (NOTE_TYPES.find(n => n[0] === t) || [t, t])[1];
 const noteTag = t => (NOTE_TYPES.find(n => n[0] === t) || [, , , ""])[3];
@@ -2084,7 +2085,7 @@ function NotifySettings({ db, act, notif }) {
                 React.createElement("span", null,
                     React.createElement("b", null, t),
                     React.createElement("small", null, d)),
-                React.createElement("input", { type: "checkbox", className: "switch", checked: p[k] !== false && (p[k] !== undefined || k === "pinreset" || k === "early"), onChange: () => setP({ ...p, [k]: !(p[k] !== false && (p[k] !== undefined || k === "pinreset" || k === "early")) }) }))),
+                React.createElement("input", { type: "checkbox", className: "switch", checked: p[k] !== false && (p[k] !== undefined || k === "pinreset" || k === "early" || k === "laterequest"), onChange: () => setP({ ...p, [k]: !(p[k] !== false && (p[k] !== undefined || k === "pinreset" || k === "early" || k === "laterequest")) }) }))),
             React.createElement("label", { className: "switchrow" },
                 React.createElement("span", null,
                     React.createElement("b", null, "Notification Tone"),

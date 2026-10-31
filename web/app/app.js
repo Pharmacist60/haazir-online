@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.13.0";
+const APP_VERSION = "1.14.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -918,6 +918,8 @@ function Home({ st, reload }) {
     const s = settingsOn(emp, shiftDate);
     const rec = open || st.attendance.find(a => a.date === shiftDate);
     const action = !rec ? "in" : !rec.out ? "out" : null;
+    // A missed check-in request for this shift that an admin has not decided yet.
+    const pendingIn = !rec && st.lateReqs.find(r => r.date === shiftDate && r.status === "pending");
     const isOff = s && s.off.includes(weekday(shiftDate));
     const recent = st.attendance.filter(a => a.date < TODAY && a.id !== rec?.id).slice(-4).reverse();
     // Check-in flow: location (pharmacy Wi-Fi or counter code), then fingerprint and/or PIN.
@@ -1027,7 +1029,16 @@ function Home({ st, reload }) {
             msg && React.createElement("div", { className: "notice" },
                 React.createElement(Wifi, { size: 16 }),
                 msg),
-            action ? (React.createElement("button", { className: "punch" + (action === "out" ? " out" : ""), onClick: start },
+            pendingIn ? (React.createElement("div", { className: "sheet pop" },
+                React.createElement(Clock, { size: 34, color: "#0F1561" }),
+                React.createElement("h3", null, "Check-In Request Pending"),
+                React.createElement("p", null,
+                    "Your request to record your check-in at ",
+                    fmt(pendingIn.in),
+                    " is waiting for an admin. Once it is approved, the ",
+                    React.createElement("b", null, "Check Out"),
+                    " button appears here so you can check out at the end of your shift."),
+                React.createElement("button", { className: "btn block", onClick: reload }, "Check Again"))) : action ? (React.createElement("button", { className: "punch" + (action === "out" ? " out" : ""), onClick: start },
                 React.createElement("span", { className: "cross" }),
                 action === "in" ? "Check In" : "Check Out")) : !done && React.createElement("div", { className: "sheet ok" },
                 React.createElement("h3", null, "Shift Complete"),

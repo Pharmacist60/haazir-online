@@ -2,7 +2,7 @@
 
 Staff attendance and payroll for **eco Pharmacy**. © The Pharmacist. All rights reserved.
 
-Version 1.13.0. Runs free on **Supabase** (database and Haazir's rules) and **GitHub Pages** (the web pages).
+Version 1.14.0. Runs free on **Supabase** (database and Haazir's rules) and **GitHub Pages** (the web pages).
 
 ## Addresses
 
