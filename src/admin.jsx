@@ -37,7 +37,7 @@ function AdminView({ db, act, reload, onSignOut, notif, serverVersion }) {
         {groups.map(([g, items]) => <div key={g} className="navgroup"><div className="group">{g}</div>{items.map(Btn)}</div>)}
       </nav>
       <main className="main">
-        {serverVersion && serverVersion !== APP_VERSION && <div className="updbar"><RefreshCw size={18} /><span>Haazir has been updated to version {serverVersion}. Reload to use the new version.</span><button className="btn small primary" onClick={() => location.reload()}>Reload</button></div>}
+        {serverVersion && serverVersion !== APP_VERSION && <div className="updbar"><RefreshCw size={18} /><span>Haazir has been updated to version {serverVersion}. Reload to use the new version.</span><button className="btn small primary" onClick={() => freshReload(serverVersion)}>Reload</button></div>}
         {superAdmin && db.update && db.update.available && tab !== "updates" && serverVersion === APP_VERSION && <div className="updbar"><Download size={18} /><span>Haazir {db.update.latest} is available. You are using version {db.update.current}.</span><button className="btn small primary" onClick={() => setTab("updates")}>View Update</button></div>}
         {tab === "today" && <Today {...p} />}
         {tab === "records" && <Records {...p} />}
@@ -905,7 +905,7 @@ function AccountMenu({ db, act, onSignOut, onSettings }) {
     setOpen(false);
     const current = prompt("Current password:"); if (!current) return;
     const next = prompt("New password (at least 8 characters):"); if (!next) return;
-    if (await act("/api/password", { current, next })) alert("Your password has been changed.");
+    await act("/api/password", { current, next });
   };
   return (
     <div className="acct">
@@ -993,8 +993,26 @@ function AdminApp() {
   };
   useEffect(() => { load(); const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60000); return () => clearInterval(t); }, []);
   // Run a change on the server, then reload. Errors go to the form (setErr) or a message at the bottom.
+  // A short confirmation after each successful change.
+  const DONE = {
+    "/api/employees/save": b => b && b.editId ? "Employee changes saved." : "Employee added.",
+    "/api/attendance/save": "Attendance entry saved.", "/api/attendance/delete": "Attendance entry deleted.",
+    "/api/devices/decide": b => b && b.approve ? "Phone approved." : "Phone request rejected.", "/api/devices/remove": "Phone removed.",
+    "/api/overtime/approve": "Overtime approved.", "/api/overtime/cancel": "Overtime cancelled.",
+    "/api/late/decide": b => b && b.approve ? "Late entry approved." : "Late entry rejected.",
+    "/api/networks/add": "Pharmacy network registered.", "/api/networks/widen": "Network now covers the whole address range.", "/api/networks/remove": "Network removed.",
+    "/api/settings/mode": "Check-in verification saved.", "/api/settings/tracking": "Attendance tracking start date saved.", "/api/settings/rules": "Early leave rules saved.",
+    "/api/admins/add": "Admin added.", "/api/admins/remove": "Admin removed.", "/api/admins/reset": "Password reset.",
+    "/api/password": "Your password has been changed.", "/api/notify/prefs": "Notification settings saved.",
+    "/api/counter/reset": "Counter code reset. Set up the counter displays again.", "/api/admin/punch": "Attendance recorded.",
+  };
   const act = async (path, body, setErr) => {
-    try { await api(path, body); await load(); return true; }
+    try {
+      await api(path, body); await load();
+      const msg = typeof DONE[path] === "function" ? DONE[path](body) : DONE[path];
+      if (msg) showToast(msg);
+      return true;
+    }
     catch (e) { if (e.status === 401) { setPhase("login"); return false; } if (setErr) setErr(e.message); else showToast(e.message, true); return false; }
   };
   const signOut = async () => { try { await api("/api/logout", {}); } catch { /* ignore */ } localStorage.removeItem("hz_token"); setDb(null); setPhase("login"); };

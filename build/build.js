@@ -12,3 +12,9 @@ function build(entry, out) {
 }
 build('admin.jsx', 'admin/admin.js');
 build('app.jsx', 'app/app.js');
+// Add ?v=<version> to the script addresses so browsers download the new files after every update.
+for (const page of ['admin/index.html', 'app/index.html']) {
+  const f = path.join(__dirname, '../web', page);
+  const html = fs.readFileSync(f, 'utf8').replace(/(src="[^"?]+\.js)(\?v=[^"]*)?"/g, `$1?v=${version}"`);
+  fs.writeFileSync(f, html);
+}

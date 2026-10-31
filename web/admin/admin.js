@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.11.0";
+const APP_VERSION = "1.12.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -245,7 +245,8 @@ table.t{width:100%;border-collapse:collapse;font-size:14px}
 .authcard .brand{margin-bottom:6px}
 .authcard h1{font-size:21px;margin:0}
 .authcard p{margin:0;color:var(--muted);font-size:14px}
-.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:12px 18px;border-radius:10px;font-size:14px;max-width:90vw;z-index:50;box-shadow:0 8px 20px rgba(15,21,97,.3)}
+.toast{font-family:'Atkinson Hyperlegible',system-ui,sans-serif;font-weight:700;position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:12px 18px;border-radius:10px;font-size:14px;max-width:90vw;z-index:50;box-shadow:0 8px 20px rgba(15,21,97,.3)}
+.toast:not(.bad){background:#00661A}
 .toast.bad{background:#B42318}
 .acct{position:relative}
 .acct>button{cursor:pointer;font:inherit;color:inherit}
@@ -647,6 +648,8 @@ async function api(path, body) {
     return data;
 }
 // Notices when the server has been updated to a newer version than the page that is open.
+// Reloads the page with the new version in its address, so the browser cannot reuse its old saved copy.
+function freshReload(v) { const u = new URL(location.href); u.searchParams.set("v", v || Date.now()); location.replace(u.toString()); }
 function useServerVersion() {
     const [v, setV] = useState(null);
     useEffect(() => {
@@ -729,7 +732,7 @@ function AdminView({ db, act, reload, onSignOut, notif, serverVersion }) {
                         "Haazir has been updated to version ",
                         serverVersion,
                         ". Reload to use the new version."),
-                    React.createElement("button", { className: "btn small primary", onClick: () => location.reload() }, "Reload")),
+                    React.createElement("button", { className: "btn small primary", onClick: () => freshReload(serverVersion) }, "Reload")),
                 superAdmin && db.update && db.update.available && tab !== "updates" && serverVersion === APP_VERSION && React.createElement("div", { className: "updbar" },
                     React.createElement(Download, { size: 18 }),
                     React.createElement("span", null,
@@ -2239,8 +2242,7 @@ function AccountMenu({ db, act, onSignOut, onSettings }) {
         const next = prompt("New password (at least 8 characters):");
         if (!next)
             return;
-        if (await act("/api/password", { current, next }))
-            alert("Your password has been changed.");
+        await act("/api/password", { current, next });
     };
     return (React.createElement("div", { className: "acct" },
         React.createElement("button", { className: "userchip", onClick: () => setOpen(!open), "aria-expanded": open },
@@ -2372,10 +2374,26 @@ function AdminApp() {
     useEffect(() => { load(); const t = setInterval(() => { if (document.visibilityState === "visible")
         load(); }, 60000); return () => clearInterval(t); }, []);
     // Run a change on the server, then reload. Errors go to the form (setErr) or a message at the bottom.
+    // A short confirmation after each successful change.
+    const DONE = {
+        "/api/employees/save": b => b && b.editId ? "Employee changes saved." : "Employee added.",
+        "/api/attendance/save": "Attendance entry saved.", "/api/attendance/delete": "Attendance entry deleted.",
+        "/api/devices/decide": b => b && b.approve ? "Phone approved." : "Phone request rejected.", "/api/devices/remove": "Phone removed.",
+        "/api/overtime/approve": "Overtime approved.", "/api/overtime/cancel": "Overtime cancelled.",
+        "/api/late/decide": b => b && b.approve ? "Late entry approved." : "Late entry rejected.",
+        "/api/networks/add": "Pharmacy network registered.", "/api/networks/widen": "Network now covers the whole address range.", "/api/networks/remove": "Network removed.",
+        "/api/settings/mode": "Check-in verification saved.", "/api/settings/tracking": "Attendance tracking start date saved.", "/api/settings/rules": "Early leave rules saved.",
+        "/api/admins/add": "Admin added.", "/api/admins/remove": "Admin removed.", "/api/admins/reset": "Password reset.",
+        "/api/password": "Your password has been changed.", "/api/notify/prefs": "Notification settings saved.",
+        "/api/counter/reset": "Counter code reset. Set up the counter displays again.", "/api/admin/punch": "Attendance recorded.",
+    };
     const act = async (path, body, setErr) => {
         try {
             await api(path, body);
             await load();
+            const msg = typeof DONE[path] === "function" ? DONE[path](body) : DONE[path];
+            if (msg)
+                showToast(msg);
             return true;
         }
         catch (e) {

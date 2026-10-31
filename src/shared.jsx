@@ -180,7 +180,8 @@ table.t{width:100%;border-collapse:collapse;font-size:14px}
 .authcard .brand{margin-bottom:6px}
 .authcard h1{font-size:21px;margin:0}
 .authcard p{margin:0;color:var(--muted);font-size:14px}
-.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:12px 18px;border-radius:10px;font-size:14px;max-width:90vw;z-index:50;box-shadow:0 8px 20px rgba(15,21,97,.3)}
+.toast{font-family:'Atkinson Hyperlegible',system-ui,sans-serif;font-weight:700;position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:12px 18px;border-radius:10px;font-size:14px;max-width:90vw;z-index:50;box-shadow:0 8px 20px rgba(15,21,97,.3)}
+.toast:not(.bad){background:#00661A}
 .toast.bad{background:#B42318}
 .acct{position:relative}
 .acct>button{cursor:pointer;font:inherit;color:inherit}
@@ -437,6 +438,8 @@ async function api(path, body) {
   return data;
 }
 // Notices when the server has been updated to a newer version than the page that is open.
+// Reloads the page with the new version in its address, so the browser cannot reuse its old saved copy.
+function freshReload(v) { const u = new URL(location.href); u.searchParams.set("v", v || Date.now()); location.replace(u.toString()); }
 function useServerVersion() {
   const [v, setV] = useState(null);
   useEffect(() => {

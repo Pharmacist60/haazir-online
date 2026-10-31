@@ -288,7 +288,7 @@ function EmployeeApp() {
       <div className="appscreen">
         <div className="status"><span>{st ? fmt(st.now) : ""}</span>{st && <span><NetIcon size={14} /> {st.atShop ? "Pharmacy Wi-Fi" : "Not on pharmacy Wi-Fi"}</span>}</div>
         <Brand />
-        {serverVersion && serverVersion !== APP_VERSION && <div className="updbar" style={{ marginBottom: 0 }}><RefreshCw size={18} /><span>Haazir has been updated.</span><button className="btn small primary" onClick={() => location.reload()}>Reload</button></div>}
+        {serverVersion && serverVersion !== APP_VERSION && <div className="updbar" style={{ marginBottom: 0 }}><RefreshCw size={18} /><span>Haazir has been updated.</span><button className="btn small primary" onClick={() => freshReload(serverVersion)}>Reload</button></div>}
         {!st && !err && <p className="muted">Loading…</p>}
         {err && !st && <div className="sheet"><h3>Unable to Connect</h3><p>{err}</p><button className="btn block" onClick={reload}>Try Again</button></div>}
         {st && st.status === "unregistered" && <Register st={st} reload={reload} />}
