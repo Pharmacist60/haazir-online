@@ -34,7 +34,13 @@ export const overnight = s => toMin(s.end) <= toMin(s.start);
 export const rel = (t, s) => { let m = toMin(t); if (overnight(s) && m < toMin(s.start) - 360) m += 1440; return m; };
 export const shiftText = s => `${fmt(s.start)} – ${fmt(s.end)}${overnight(s) ? ' (next day)' : ''}`;
 
-export function settingsOn(e, ds) { let s = null; for (const h of e.history) if (h.from <= ds) s = h; return s; }
+export function settingsOn(e, ds, raw = false) {
+  let s = null; for (const h of e.history) if (h.from <= ds) s = h;
+  // Day-specific hours (for example a different Friday shift) replace the normal shift on that weekday.
+  const d = s && !raw && s.dayShifts ? s.dayShifts[weekday(ds)] : null;
+  // Flexible (the default): the end time is not fixed, so extra time is not overtime and there is no early-leave check.
+  return d ? { ...s, start: d.start, end: d.end, hours: d.hours, special: true, flexible: d.flexible !== false } : s;
+}
 export const employed = (e, ds) => ds >= e.joined && (!e.left || ds <= e.left);
 // Resigned staff can still work on their last day; access ends the day after.
 export const isGone = e => !!e.left && e.left < today();

@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.9.0";
+const APP_VERSION = "1.11.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -295,9 +295,16 @@ const rs = n => "Rs " + Math.round(n).toLocaleString("en-PK");
 const minText = m => m >= 60 ? `${Math.floor(m / 60)} hr ${m % 60} min` : `${m} min`;
 const niceDate = ds => new Date(ds + "T00:00:00").toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
 const monthName = ym => new Date(ym + "-01T00:00:00").toLocaleString("en-GB", { month: "long", year: "numeric" });
-function settingsOn(e, ds) { let s = null; for (const h of e.history)
-    if (h.from <= ds)
-        s = h; return s; }
+function settingsOn(e, ds, raw = false) {
+    let s = null;
+    for (const h of e.history)
+        if (h.from <= ds)
+            s = h;
+    // Day-specific hours (for example a different Friday shift) replace the normal shift on that weekday.
+    const d = s && !raw && s.dayShifts ? s.dayShifts[weekday(ds)] : null;
+    // Flexible (the default): the end time is not fixed, so extra time is not overtime and there is no early-leave check.
+    return d ? { ...s, start: d.start, end: d.end, hours: d.hours, special: true, flexible: d.flexible !== false } : s;
+}
 const lateBeyond = (rec, s) => Math.max(0, rel(rec.in, s) - toMin(s.start) - s.grace);
 const extraAfterShift = (rec, s) => rel(rec.out, s) - (toMin(s.end) + (overnight(s) ? 1440 : 0));
 // Decide whether a check-in now belongs to today's shift or to last night's shift.
@@ -330,6 +337,10 @@ function setRules(r) { if (r)
 function dayKind(rec, s) {
     if (!rec || !rec.out)
         return { kind: "full", early: 0, worked: null };
+    if (s.flexible) {
+        const w = rel(rec.out, s) - rel(rec.in, s);
+        return { kind: w >= s.hours * 60 * RULES.halfPct / 100 ? "full" : "short", early: 0, worked: w };
+    }
     const endAbs = toMin(s.end) + (overnight(s) ? 1440 : 0);
     const early = Math.max(0, endAbs - rel(rec.out, s));
     const worked = rel(rec.out, s) - rel(rec.in, s);
@@ -1191,9 +1202,9 @@ function RecordsInner({ db, act }) {
                         "Half Day (left ",
                         minText(dk.early),
                         " early)") : dk.kind === "short" ? React.createElement("span", { className: "tag red" },
-                        "Short Day (left ",
-                        minText(dk.early),
-                        " early)") : !rec.out && ds < YEST ? React.createElement("span", { className: "tag red" }, "No Check-Out") : lm > 0 ? React.createElement("span", { className: "tag amber" },
+                        "Short Day (",
+                        dk.early ? `left ${minText(dk.early)} early` : `worked ${minText(dk.worked)}`,
+                        ")") : !rec.out && ds < YEST ? React.createElement("span", { className: "tag red" }, "No Check-Out") : lm > 0 ? React.createElement("span", { className: "tag amber" },
                         "Late by ",
                         minText(lm)) : React.createElement("span", { className: "tag" }, "On Time");
                     return React.createElement("tr", { key: ds },
@@ -1208,13 +1219,46 @@ function RecordsInner({ db, act }) {
                                 rec && React.createElement("button", { className: "btn small danger", onClick: () => remove(ds) }, "Delete"))));
                 }))))));
 }
-const blankForm = () => ({ name: "", role: "", pin: "", notes: "", joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthMode: "auto", monthHours: "", off: [], leaves: 0, grace: 10, from: TODAY });
+const blankForm = () => ({ name: "", role: "", pin: "", notes: "", dayShifts: {}, joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthMode: "auto", monthHours: "", off: [], leaves: 0, grace: 10, from: TODAY });
+// Different hours on particular weekdays (for example a Friday night shift).
+function DayShifts({ form, f }) {
+    const ds = form.dayShifts || {};
+    const set = v => f("dayShifts", v);
+    const unused = DAYS.map((d, i) => i).filter(i => !ds[i]);
+    return (React.createElement("div", { style: { marginBottom: 14 } },
+        React.createElement("span", { className: "lbl" }, "Different hours on some days (optional)"),
+        Object.keys(ds).length === 0 ? React.createElement("p", { className: "muted", style: { margin: "2px 0 8px", fontSize: 13 } }, "Every working day uses the shift above. Add a day if that day's duty hours are different, for example Friday 11:00 PM to 7:00 AM.")
+            : React.createElement("p", { className: "muted", style: { margin: "2px 0 8px", fontSize: 13 } },
+                "With ",
+                React.createElement("b", null, "Flexible end time"),
+                " ticked, the start time still counts for lateness, but staying later is not overtime and leaving earlier is not a half day. The day only counts as an absence if fewer than the half-day share of its hours are worked."),
+        Object.entries(ds).sort((a, b) => a[0] - b[0]).map(([k, v]) => (React.createElement("div", { className: "row", key: k, style: { alignItems: "end", marginBottom: 8 } },
+            React.createElement("div", { style: { width: 70, fontWeight: 700, paddingBottom: 9 } }, DAYS[k]),
+            React.createElement("div", { className: "field" },
+                React.createElement("label", null, "Start"),
+                React.createElement("input", { type: "time", value: v.start, onChange: e => set({ ...ds, [k]: { ...v, start: e.target.value } }) })),
+            React.createElement("div", { className: "field" },
+                React.createElement("label", null, "End"),
+                React.createElement("input", { type: "time", value: v.end, onChange: e => set({ ...ds, [k]: { ...v, end: e.target.value } }) })),
+            React.createElement("div", { className: "field", style: { width: 110 } },
+                React.createElement("label", null, "Hours"),
+                React.createElement("input", { type: "number", step: "0.5", value: v.hours, onChange: e => set({ ...ds, [k]: { ...v, hours: e.target.value } }) })),
+            React.createElement("label", { style: { display: "flex", gap: 6, alignItems: "center", paddingBottom: 9, fontSize: 13 } },
+                React.createElement("input", { type: "checkbox", style: { width: "auto" }, checked: v.flexible !== false, onChange: () => set({ ...ds, [k]: { ...v, flexible: v.flexible === false } }) }),
+                " Flexible end time"),
+            React.createElement("button", { className: "btn small danger", style: { marginBottom: 3 }, onClick: () => { const n = { ...ds }; delete n[k]; set(n); } }, "Remove"),
+            v.start && v.end && toMin(v.end) <= toMin(v.start) && React.createElement("span", { className: "muted", style: { fontSize: 12, paddingBottom: 9 } }, "Ends the next morning")))),
+        unused.length > 0 && React.createElement("select", { style: { width: "auto" }, value: "", onChange: e => { if (e.target.value !== "")
+                set({ ...ds, [e.target.value]: { start: form.start, end: form.end, hours: form.hours, flexible: true } }); } },
+            React.createElement("option", { value: "" }, "+ Add a day with different hours"),
+            unused.map(i => React.createElement("option", { key: i, value: i }, ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][i])))));
+}
 const monthText = v => v === -1 ? "Automatic" : v ? `${v} hrs/month` : "No limit";
 function Employees({ db, act }) {
     const [form, setForm] = useState(null);
     const [err, setErr] = useState("");
     const f = (k, v) => setForm({ ...form, [k]: v });
-    const openEdit = e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; setErr(""); setForm({ editId: e.id, name: e.name, role: e.role, pin: "", joined: e.joined, left: e.left || "", notes: e.notes || "", ...s, monthMode: s.monthHours === -1 ? "auto" : s.monthHours ? "fixed" : "none", monthHours: s.monthHours > 0 ? s.monthHours : "", monthHours: s.monthHours ?? "", off: [...s.off], from: TODAY }); };
+    const openEdit = e => { const s = settingsOn(e, TODAY, true) || e.history[e.history.length - 1]; setErr(""); setForm({ editId: e.id, name: e.name, role: e.role, pin: "", joined: e.joined, left: e.left || "", notes: e.notes || "", ...s, monthMode: s.monthHours === -1 ? "auto" : s.monthHours ? "fixed" : "none", monthHours: s.monthHours > 0 ? s.monthHours : "", monthHours: s.monthHours ?? "", off: [...s.off], dayShifts: JSON.parse(JSON.stringify(s.dayShifts || {})), from: TODAY }); };
     const save = async () => {
         const n = ["salary", "hours", "leaves", "grace"];
         const vals = Object.fromEntries(n.map(k => [k, Number(form[k])]));
@@ -1226,6 +1270,9 @@ function Employees({ db, act }) {
             return setErr("Please enter the joining date.");
         if (form.monthMode === "fixed" && !(Number(form.monthHours) > 0))
             return setErr("Enter the allowed hours per month, or choose Automatic or No limit.");
+        for (const v of Object.values(form.dayShifts || {}))
+            if (!v.start || !v.end || !(Number(v.hours) > 0))
+                return setErr("Please enter the start, end and hours for each day with different hours.");
         if (form.left && form.left < form.joined)
             return setErr("The resign date cannot be earlier than the joining date.");
         if (n.some(k => isNaN(vals[k]) || vals[k] < 0) || vals.salary <= 0 || vals.hours <= 0)
@@ -1293,6 +1340,7 @@ function Employees({ db, act }) {
                 React.createElement("textarea", { rows: 2, maxLength: 500, value: form.notes, placeholder: "e.g. Usual day off: Sunday. Prefers evening shifts.", onChange: e => f("notes", e.target.value) })),
             form.monthMode === "auto" && React.createElement("p", { className: "muted", style: { margin: "0 0 12px", fontSize: 13 } }, "Automatic allowed hours = daily working hours \u00D7 (days in the month \u2212 weekly days off). For example, 10 hours a day with no weekly day off gives 280 hours in a 28-day month, 300 in a 30-day month and 310 in a 31-day month. Paid leaves not taken are paid extra in Payroll."),
             form.start && form.end && overnight(form) && React.createElement("div", { className: "notice", style: { marginBottom: 12 } }, "Night shift: ends the following morning. Attendance is recorded under the shift's start date, and the weekly day off refers to the night the shift would begin."),
+            React.createElement(DayShifts, { form: form, f: f }),
             React.createElement("span", { className: "lbl" }, "Weekly day off"),
             React.createElement("div", { className: "chips", style: { marginBottom: 14 } }, DAYS.map((d, i) => React.createElement("button", { key: d, className: form.off.includes(i) ? "on" : "", onClick: () => f("off", form.off.includes(i) ? form.off.filter(x => x !== i) : [...form.off, i]) }, d))),
             React.createElement("div", { className: "row" },
@@ -1316,7 +1364,16 @@ function Employees({ db, act }) {
                     React.createElement("tbody", null, editing.history.slice().reverse().map(h => React.createElement("tr", { key: h.from },
                         React.createElement("td", { className: "nw" }, longDate(h.from)),
                         React.createElement("td", null, rs(h.salary)),
-                        React.createElement("td", null, shiftText(h)),
+                        React.createElement("td", null,
+                            shiftText(h),
+                            Object.entries(h.dayShifts || {}).map(([k, v]) => React.createElement("div", { key: k, className: "muted" },
+                                DAYS[k],
+                                ": ",
+                                shiftText(v),
+                                ", ",
+                                v.hours,
+                                " hrs",
+                                v.flexible !== false ? ", flexible" : ""))),
                         React.createElement("td", null, h.hours),
                         React.createElement("td", null, monthText(h.monthHours)),
                         React.createElement("td", null, h.leaves),
@@ -1343,7 +1400,7 @@ function Employees({ db, act }) {
                         React.createElement("th", null, "Grace"),
                         React.createElement("th", null))),
                 React.createElement("tbody", null, [...db.employees].sort((a, b) => isGone(a) - isGone(b)).map(e => {
-                    const s = settingsOn(e, TODAY) || e.history[e.history.length - 1];
+                    const s = settingsOn(e, TODAY, true) || e.history[e.history.length - 1];
                     return (React.createElement("tr", { key: e.id },
                         React.createElement("td", null,
                             React.createElement("b", null, e.name),
@@ -1362,7 +1419,14 @@ function Employees({ db, act }) {
                             fmt(s.start),
                             " \u2013 ",
                             fmt(s.end),
-                            overnight(s) && React.createElement("div", { className: "muted" }, "Night shift")),
+                            overnight(s) && React.createElement("div", { className: "muted" }, "Night shift"),
+                            Object.entries(s.dayShifts || {}).map(([k, v]) => React.createElement("div", { key: k, className: "muted" },
+                                DAYS[k],
+                                ": ",
+                                fmt(v.start),
+                                " \u2013 ",
+                                fmt(v.end),
+                                v.flexible !== false ? " (flexible)" : ""))),
                         React.createElement("td", { className: "nw" },
                             s.hours,
                             " hrs/day",
@@ -1429,7 +1493,7 @@ function OvertimeInner({ db, act, me }) {
         const e = db.employees.find(x => x.id === a.empId);
         const s = settingsOn(e, a.date);
         return { a, s, extra: extraAfterShift(a, s) };
-    }).filter(x => x.extra >= 15 && !has(x.a.empId, x.a.date)).reverse();
+    }).filter(x => x.extra >= 15 && !x.s.flexible && !has(x.a.empId, x.a.date)).reverse();
     const approve = (empId, date, hours, rate) => act("/api/overtime/approve", { empId, date, hours: Number(hours), rate: Number(rate) });
     const remove = o => act("/api/overtime/cancel", { empId: o.empId, date: o.date });
     const approved = db.overtime.filter(o => o.date.startsWith(month));
@@ -1736,11 +1800,14 @@ function TrackingStart({ db, act }) {
     const [err, setErr] = useState("");
     return (React.createElement("div", { className: "panel" },
         React.createElement("h2", null, "Attendance Tracking Start"),
-        React.createElement("p", null, "Haazir records attendance and calculates payroll from this date. Days before it are not included in attendance or payroll. Set it to the day your staff start checking in with Haazir. Admins and super admins can change it; every change is recorded in the audit log."),
+        React.createElement("p", null,
+            "Haazir records attendance and calculates payroll from this date. Days before it are not included in attendance or payroll. Set it to the day your staff start checking in with Haazir; it can be a date in the future, and check-ins before then are kept but not counted.",
+            db.trackingStart > TODAY ? ` Tracking starts on ${longDate(db.trackingStart)}.` : "",
+            " Admins and super admins can change it; every change is recorded in the audit log."),
         React.createElement("div", { className: "row" },
             React.createElement("div", { className: "field", style: { width: 200 } },
                 React.createElement("label", null, "Start date"),
-                React.createElement("input", { type: "date", value: d, max: TODAY, onChange: e => setD(e.target.value) })),
+                React.createElement("input", { type: "date", value: d, max: addDays(TODAY, 366), onChange: e => setD(e.target.value) })),
             React.createElement("button", { className: "btn primary", disabled: d === db.trackingStart, onClick: () => act("/api/settings/tracking", { date: d }, setErr) }, "Save Date")),
         err && React.createElement("div", { className: "err" }, err)));
 }

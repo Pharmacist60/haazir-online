@@ -313,7 +313,7 @@ function RecordsInner({ db, act }) {
             );
             const lm = rec ? lateBeyond(rec, s) : 0;
             const dk = rec ? dayKind(rec, s) : null;
-            const st = off ? <span className="tag grey">Day Off</span> : !rec && ds < TRACK_START ? <span className="tag grey">Before Tracking</span> : !rec ? (ds === TODAY ? <span className="tag grey">Today</span> : <span className="tag red">Absent</span>) : dk.kind === "half" ? <span className="tag amber">Half Day (left {minText(dk.early)} early)</span> : dk.kind === "short" ? <span className="tag red">Short Day (left {minText(dk.early)} early)</span> : !rec.out && ds < YEST ? <span className="tag red">No Check-Out</span> : lm > 0 ? <span className="tag amber">Late by {minText(lm)}</span> : <span className="tag">On Time</span>;
+            const st = off ? <span className="tag grey">Day Off</span> : !rec && ds < TRACK_START ? <span className="tag grey">Before Tracking</span> : !rec ? (ds === TODAY ? <span className="tag grey">Today</span> : <span className="tag red">Absent</span>) : dk.kind === "half" ? <span className="tag amber">Half Day (left {minText(dk.early)} early)</span> : dk.kind === "short" ? <span className="tag red">Short Day ({dk.early ? `left ${minText(dk.early)} early` : `worked ${minText(dk.worked)}`})</span> : !rec.out && ds < YEST ? <span className="tag red">No Check-Out</span> : lm > 0 ? <span className="tag amber">Late by {minText(lm)}</span> : <span className="tag">On Time</span>;
             return <tr key={ds}><td>{niceDate(ds)}</td><td>{rec ? timeText(rec.in, s) : "—"}</td><td>{rec ? timeText(rec.out, s) : "—"}</td><td>{rec?.method || "—"}</td><td>{st}</td>
               <td><div className="row" style={{ justifyContent: "flex-end", flexWrap: "nowrap" }}>
                 <button className="btn small" onClick={() => { setErr(""); setEdit({ date: ds, in: rec?.in || s.start, out: rec?.out || "", reason: "" }); }}>{rec ? "Edit" : "Add Entry"}</button>
@@ -324,19 +324,48 @@ function RecordsInner({ db, act }) {
   );
 }
 
-const blankForm = () => ({ name: "", role: "", pin: "", notes: "", joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthMode: "auto", monthHours: "", off: [], leaves: 0, grace: 10, from: TODAY });
+const blankForm = () => ({ name: "", role: "", pin: "", notes: "", dayShifts: {}, joined: TODAY, left: "", salary: 30000, start: "09:00", end: "17:00", hours: 8, monthMode: "auto", monthHours: "", off: [], leaves: 0, grace: 10, from: TODAY });
+// Different hours on particular weekdays (for example a Friday night shift).
+function DayShifts({ form, f }) {
+  const ds = form.dayShifts || {};
+  const set = v => f("dayShifts", v);
+  const unused = DAYS.map((d, i) => i).filter(i => !ds[i]);
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <span className="lbl">Different hours on some days (optional)</span>
+      {Object.keys(ds).length === 0 ? <p className="muted" style={{ margin: "2px 0 8px", fontSize: 13 }}>Every working day uses the shift above. Add a day if that day's duty hours are different, for example Friday 11:00 PM to 7:00 AM.</p>
+        : <p className="muted" style={{ margin: "2px 0 8px", fontSize: 13 }}>With <b>Flexible end time</b> ticked, the start time still counts for lateness, but staying later is not overtime and leaving earlier is not a half day. The day only counts as an absence if fewer than the half-day share of its hours are worked.</p>}
+      {Object.entries(ds).sort((a, b) => a[0] - b[0]).map(([k, v]) => (
+        <div className="row" key={k} style={{ alignItems: "end", marginBottom: 8 }}>
+          <div style={{ width: 70, fontWeight: 700, paddingBottom: 9 }}>{DAYS[k]}</div>
+          <div className="field"><label>Start</label><input type="time" value={v.start} onChange={e => set({ ...ds, [k]: { ...v, start: e.target.value } })} /></div>
+          <div className="field"><label>End</label><input type="time" value={v.end} onChange={e => set({ ...ds, [k]: { ...v, end: e.target.value } })} /></div>
+          <div className="field" style={{ width: 110 }}><label>Hours</label><input type="number" step="0.5" value={v.hours} onChange={e => set({ ...ds, [k]: { ...v, hours: e.target.value } })} /></div>
+          <label style={{ display: "flex", gap: 6, alignItems: "center", paddingBottom: 9, fontSize: 13 }}><input type="checkbox" style={{ width: "auto" }} checked={v.flexible !== false} onChange={() => set({ ...ds, [k]: { ...v, flexible: v.flexible === false } })} /> Flexible end time</label>
+          <button className="btn small danger" style={{ marginBottom: 3 }} onClick={() => { const n = { ...ds }; delete n[k]; set(n); }}>Remove</button>
+          {v.start && v.end && toMin(v.end) <= toMin(v.start) && <span className="muted" style={{ fontSize: 12, paddingBottom: 9 }}>Ends the next morning</span>}
+        </div>
+      ))}
+      {unused.length > 0 && <select style={{ width: "auto" }} value="" onChange={e => { if (e.target.value !== "") set({ ...ds, [e.target.value]: { start: form.start, end: form.end, hours: form.hours, flexible: true } }); }}>
+        <option value="">+ Add a day with different hours</option>
+        {unused.map(i => <option key={i} value={i}>{["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][i]}</option>)}
+      </select>}
+    </div>
+  );
+}
 const monthText = v => v === -1 ? "Automatic" : v ? `${v} hrs/month` : "No limit";
 
 function Employees({ db, act }) {
   const [form, setForm] = useState(null); const [err, setErr] = useState("");
   const f = (k, v) => setForm({ ...form, [k]: v });
-  const openEdit = e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; setErr(""); setForm({ editId: e.id, name: e.name, role: e.role, pin: "", joined: e.joined, left: e.left || "", notes: e.notes || "", ...s, monthMode: s.monthHours === -1 ? "auto" : s.monthHours ? "fixed" : "none", monthHours: s.monthHours > 0 ? s.monthHours : "", monthHours: s.monthHours ?? "", off: [...s.off], from: TODAY }); };
+  const openEdit = e => { const s = settingsOn(e, TODAY, true) || e.history[e.history.length - 1]; setErr(""); setForm({ editId: e.id, name: e.name, role: e.role, pin: "", joined: e.joined, left: e.left || "", notes: e.notes || "", ...s, monthMode: s.monthHours === -1 ? "auto" : s.monthHours ? "fixed" : "none", monthHours: s.monthHours > 0 ? s.monthHours : "", monthHours: s.monthHours ?? "", off: [...s.off], dayShifts: JSON.parse(JSON.stringify(s.dayShifts || {})), from: TODAY }); };
   const save = async () => {
     const n = ["salary", "hours", "leaves", "grace"]; const vals = Object.fromEntries(n.map(k => [k, Number(form[k])]));
     if (!form.name.trim()) return setErr("Please enter the employee's name.");
     if (form.editId ? form.pin && !/^\d{4}$/.test(form.pin) : !/^\d{4}$/.test(form.pin)) return setErr(form.editId ? "A new PIN must be 4 digits, or leave it blank to keep the current PIN." : "PIN must be 4 digits.");
     if (!form.joined) return setErr("Please enter the joining date.");
     if (form.monthMode === "fixed" && !(Number(form.monthHours) > 0)) return setErr("Enter the allowed hours per month, or choose Automatic or No limit.");
+    for (const v of Object.values(form.dayShifts || {})) if (!v.start || !v.end || !(Number(v.hours) > 0)) return setErr("Please enter the start, end and hours for each day with different hours.");
     if (form.left && form.left < form.joined) return setErr("The resign date cannot be earlier than the joining date.");
     if (n.some(k => isNaN(vals[k]) || vals[k] < 0) || vals.salary <= 0 || vals.hours <= 0) return setErr("Please check the salary, hours, leaves and grace period.");
     const r = await act("/api/employees/save", { ...form, monthHours: form.monthMode === "auto" ? -1 : form.monthMode === "fixed" ? Number(form.monthHours) : "" }, setErr);
@@ -372,22 +401,23 @@ function Employees({ db, act }) {
             <textarea rows={2} maxLength={500} value={form.notes} placeholder="e.g. Usual day off: Sunday. Prefers evening shifts." onChange={e => f("notes", e.target.value)} /></div>
           {form.monthMode === "auto" && <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>Automatic allowed hours = daily working hours × (days in the month − weekly days off). For example, 10 hours a day with no weekly day off gives 280 hours in a 28-day month, 300 in a 30-day month and 310 in a 31-day month. Paid leaves not taken are paid extra in Payroll.</p>}
           {form.start && form.end && overnight(form) && <div className="notice" style={{ marginBottom: 12 }}>Night shift: ends the following morning. Attendance is recorded under the shift's start date, and the weekly day off refers to the night the shift would begin.</div>}
+          <DayShifts form={form} f={f} />
           <span className="lbl">Weekly day off</span>
           <div className="chips" style={{ marginBottom: 14 }}>{DAYS.map((d, i) => <button key={d} className={form.off.includes(i) ? "on" : ""} onClick={() => f("off", form.off.includes(i) ? form.off.filter(x => x !== i) : [...form.off, i])}>{d}</button>)}</div>
           <div className="row"><button className="btn primary" onClick={save}>{form.editId ? "Save Changes" : "Add Employee"}</button><button className="btn" onClick={() => setForm(null)}>Cancel</button></div>
           {err && <div className="err">{err}</div>}
           {editing && <><h2 style={{ marginTop: 20 }}>Settings History</h2>
             <table className="t"><thead><tr><th>Effective From</th><th>Salary</th><th>Shift</th><th>Hours/Day</th><th>Hours/Month</th><th>Paid Leaves</th><th>Grace</th><th>Day Off</th><th>Changed By</th></tr></thead>
-              <tbody>{editing.history.slice().reverse().map(h => <tr key={h.from}><td className="nw">{longDate(h.from)}</td><td>{rs(h.salary)}</td><td>{shiftText(h)}</td><td>{h.hours}</td><td>{monthText(h.monthHours)}</td><td>{h.leaves}</td><td>{h.grace} min</td><td>{h.off.map(i => DAYS[i]).join(", ") || "None"}</td><td className="nw">{h.changedBy ? <>{h.changedBy}<div className="muted">{h.changedAt}</div></> : <span className="muted">Before records</span>}</td></tr>)}</tbody></table>
+              <tbody>{editing.history.slice().reverse().map(h => <tr key={h.from}><td className="nw">{longDate(h.from)}</td><td>{rs(h.salary)}</td><td>{shiftText(h)}{Object.entries(h.dayShifts || {}).map(([k, v]) => <div key={k} className="muted">{DAYS[k]}: {shiftText(v)}, {v.hours} hrs{v.flexible !== false ? ", flexible" : ""}</div>)}</td><td>{h.hours}</td><td>{monthText(h.monthHours)}</td><td>{h.leaves}</td><td>{h.grace} min</td><td>{h.off.map(i => DAYS[i]).join(", ") || "None"}</td><td className="nw">{h.changedBy ? <>{h.changedBy}<div className="muted">{h.changedAt}</div></> : <span className="muted">Before records</span>}</td></tr>)}</tbody></table>
             <p className="muted" style={{ fontSize: 13, marginTop: 8 }}>Each row applies from its date until the next row. A pay raise or new duty hours appear here as a new row; earlier months keep the old figures.</p></>}
         </div>
       ) : <div style={{ marginBottom: 18 }}><button className="btn primary" onClick={() => { setErr(""); setForm(blankForm()); }}>Add Employee</button></div>}
       <div className="panel">
         <table className="t"><thead><tr><th>Employee</th><th>Employment</th><th>Salary</th><th>Shift</th><th>Hours</th><th>Day Off</th><th>Paid Leaves</th><th>Grace</th><th></th></tr></thead>
-          <tbody>{[...db.employees].sort((a, b) => isGone(a) - isGone(b)).map(e => { const s = settingsOn(e, TODAY) || e.history[e.history.length - 1]; return (
+          <tbody>{[...db.employees].sort((a, b) => isGone(a) - isGone(b)).map(e => { const s = settingsOn(e, TODAY, true) || e.history[e.history.length - 1]; return (
             <tr key={e.id}><td><b>{e.name}</b><div className="muted">{e.role}</div><div className="muted">{e.id}</div>{e.notes && <div className="remark">{e.notes}</div>}</td>
               <td className="nw">Joined {longDate(e.joined)}{e.left && <div style={{ marginTop: 4 }}>{isGone(e) ? <span className="tag grey">Resigned</span> : <span className="tag amber">Leaving</span>} <span className="muted">{longDate(e.left)}</span></div>}</td>
-              <td className="nw">{rs(s.salary)}</td><td className="nw">{fmt(s.start)} – {fmt(s.end)}{overnight(s) && <div className="muted">Night shift</div>}</td><td className="nw">{s.hours} hrs/day<div className="muted">{s.monthHours === -1 ? "Automatic monthly hours" : s.monthHours ? `${s.monthHours} hrs/month` : "No monthly limit"}</div></td><td>{s.off.map(i => DAYS[i]).join(", ") || "None"}</td><td className="nw">{s.leaves} / month</td><td className="nw">{s.grace} min</td>
+              <td className="nw">{rs(s.salary)}</td><td className="nw">{fmt(s.start)} – {fmt(s.end)}{overnight(s) && <div className="muted">Night shift</div>}{Object.entries(s.dayShifts || {}).map(([k, v]) => <div key={k} className="muted">{DAYS[k]}: {fmt(v.start)} – {fmt(v.end)}{v.flexible !== false ? " (flexible)" : ""}</div>)}</td><td className="nw">{s.hours} hrs/day<div className="muted">{s.monthHours === -1 ? "Automatic monthly hours" : s.monthHours ? `${s.monthHours} hrs/month` : "No monthly limit"}</div></td><td>{s.off.map(i => DAYS[i]).join(", ") || "None"}</td><td className="nw">{s.leaves} / month</td><td className="nw">{s.grace} min</td>
               <td><button className="btn small" onClick={() => openEdit(e)}>Edit</button></td></tr>); })}</tbody></table>
       </div>
     </>
@@ -431,7 +461,7 @@ function OvertimeInner({ db, act, me }) {
   const detected = db.attendance.filter(a => a.synced && a.out && a.date.startsWith(month) && db.employees.some(e => e.id === a.empId)).map(a => {
     const e = db.employees.find(x => x.id === a.empId); const s = settingsOn(e, a.date);
     return { a, s, extra: extraAfterShift(a, s) };
-  }).filter(x => x.extra >= 15 && !has(x.a.empId, x.a.date)).reverse();
+  }).filter(x => x.extra >= 15 && !x.s.flexible && !has(x.a.empId, x.a.date)).reverse();
   const approve = (empId, date, hours, rate) => act("/api/overtime/approve", { empId, date, hours: Number(hours), rate: Number(rate) });
   const remove = o => act("/api/overtime/cancel", { empId: o.empId, date: o.date });
   const approved = db.overtime.filter(o => o.date.startsWith(month));
@@ -584,9 +614,9 @@ function TrackingStart({ db, act }) {
   return (
     <div className="panel">
       <h2>Attendance Tracking Start</h2>
-      <p>Haazir records attendance and calculates payroll from this date. Days before it are not included in attendance or payroll. Set it to the day your staff start checking in with Haazir. Admins and super admins can change it; every change is recorded in the audit log.</p>
+      <p>Haazir records attendance and calculates payroll from this date. Days before it are not included in attendance or payroll. Set it to the day your staff start checking in with Haazir; it can be a date in the future, and check-ins before then are kept but not counted.{db.trackingStart > TODAY ? ` Tracking starts on ${longDate(db.trackingStart)}.` : ""} Admins and super admins can change it; every change is recorded in the audit log.</p>
       <div className="row">
-        <div className="field" style={{ width: 200 }}><label>Start date</label><input type="date" value={d} max={TODAY} onChange={e => setD(e.target.value)} /></div>
+        <div className="field" style={{ width: 200 }}><label>Start date</label><input type="date" value={d} max={addDays(TODAY, 366)} onChange={e => setD(e.target.value)} /></div>
         <button className="btn primary" disabled={d === db.trackingStart} onClick={() => act("/api/settings/tracking", { date: d }, setErr)}>Save Date</button>
       </div>
       {err && <div className="err">{err}</div>}

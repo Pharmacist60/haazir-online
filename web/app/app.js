@@ -1,6 +1,6 @@
 "use strict";
 "use strict";
-const APP_VERSION = "1.9.0";
+const APP_VERSION = "1.11.0";
 /* Icons from Lucide (ISC License), https://lucide.dev */
 const ICON_TREES = {
     Clock: [{ "tag": "circle", "attr": { "cx": "12", "cy": "12", "r": "10" }, "child": [] }, { "tag": "polyline", "attr": { "points": "12 6 12 12 16 14" }, "child": [] }],
@@ -295,9 +295,16 @@ const rs = n => "Rs " + Math.round(n).toLocaleString("en-PK");
 const minText = m => m >= 60 ? `${Math.floor(m / 60)} hr ${m % 60} min` : `${m} min`;
 const niceDate = ds => new Date(ds + "T00:00:00").toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
 const monthName = ym => new Date(ym + "-01T00:00:00").toLocaleString("en-GB", { month: "long", year: "numeric" });
-function settingsOn(e, ds) { let s = null; for (const h of e.history)
-    if (h.from <= ds)
-        s = h; return s; }
+function settingsOn(e, ds, raw = false) {
+    let s = null;
+    for (const h of e.history)
+        if (h.from <= ds)
+            s = h;
+    // Day-specific hours (for example a different Friday shift) replace the normal shift on that weekday.
+    const d = s && !raw && s.dayShifts ? s.dayShifts[weekday(ds)] : null;
+    // Flexible (the default): the end time is not fixed, so extra time is not overtime and there is no early-leave check.
+    return d ? { ...s, start: d.start, end: d.end, hours: d.hours, special: true, flexible: d.flexible !== false } : s;
+}
 const lateBeyond = (rec, s) => Math.max(0, rel(rec.in, s) - toMin(s.start) - s.grace);
 const extraAfterShift = (rec, s) => rel(rec.out, s) - (toMin(s.end) + (overnight(s) ? 1440 : 0));
 // Decide whether a check-in now belongs to today's shift or to last night's shift.
@@ -330,6 +337,10 @@ function setRules(r) { if (r)
 function dayKind(rec, s) {
     if (!rec || !rec.out)
         return { kind: "full", early: 0, worked: null };
+    if (s.flexible) {
+        const w = rel(rec.out, s) - rel(rec.in, s);
+        return { kind: w >= s.hours * 60 * RULES.halfPct / 100 ? "full" : "short", early: 0, worked: w };
+    }
     const endAbs = toMin(s.end) + (overnight(s) ? 1440 : 0);
     const early = Math.max(0, endAbs - rel(rec.out, s));
     const worked = rel(rec.out, s) - rel(rec.in, s);

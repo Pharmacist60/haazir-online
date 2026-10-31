@@ -5,7 +5,7 @@ import zlib from 'node:zlib';
 import { Buffer } from 'node:buffer';
 import * as L from './logic.js';
 
-export const VERSION = '1.9.0';
+export const VERSION = '1.11.0';
 
 /* ---------------- database layout ---------------- */
 // Every table, with its columns. Used to create the database, and to back up and restore it.
@@ -13,7 +13,7 @@ const TABLES = {
   settings: ['key', 'value'],
   admins: ['username', 'name', 'role', 'pass_hash', 'created_at', 'notify', 'last_seen'],
   employees: ['id', 'name', 'role', 'pin_hash', 'joined', 'left_date', 'device_id', 'created_at', 'notes'],
-  emp_settings: ['emp_id', 'eff_from', 'salary', 'start_time', 'end_time', 'hours', 'month_hours', 'off_days', 'leaves', 'grace', 'changed_by', 'changed_at'],
+  emp_settings: ['emp_id', 'eff_from', 'salary', 'start_time', 'end_time', 'hours', 'month_hours', 'off_days', 'leaves', 'grace', 'changed_by', 'changed_at', 'day_shifts'],
   devices: ['id', 'emp_id', 'label', 'status', 'is_change', 'requested_at', 'pin_fails', 'locked_until'],
   attendance: ['id', 'emp_key', 'date', 'in_time', 'out_time', 'method', 'created_at'],
   overtime: ['emp_id', 'date', 'hours', 'rate', 'approved_by'],
@@ -33,7 +33,7 @@ function schema(dialect) {
     `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS admins (username TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, pass_hash TEXT NOT NULL, created_at TEXT NOT NULL, notify TEXT NOT NULL DEFAULT '${DEFAULT_NOTIFY}', last_seen INTEGER NOT NULL DEFAULT 0)`,
     `CREATE TABLE IF NOT EXISTS employees (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '', pin_hash TEXT NOT NULL, joined TEXT NOT NULL, left_date TEXT, device_id TEXT, created_at TEXT NOT NULL, notes TEXT)`,
-    `CREATE TABLE IF NOT EXISTS emp_settings (emp_id TEXT NOT NULL, eff_from TEXT NOT NULL, salary ${REAL} NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, hours ${REAL} NOT NULL, month_hours ${REAL}, off_days TEXT NOT NULL, leaves INTEGER NOT NULL, grace INTEGER NOT NULL, changed_by TEXT, changed_at TEXT, PRIMARY KEY (emp_id, eff_from))`,
+    `CREATE TABLE IF NOT EXISTS emp_settings (emp_id TEXT NOT NULL, eff_from TEXT NOT NULL, salary ${REAL} NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL, hours ${REAL} NOT NULL, month_hours ${REAL}, off_days TEXT NOT NULL, leaves INTEGER NOT NULL, grace INTEGER NOT NULL, changed_by TEXT, changed_at TEXT, day_shifts TEXT, PRIMARY KEY (emp_id, eff_from))`,
     `CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, emp_id TEXT NOT NULL, label TEXT NOT NULL, status TEXT NOT NULL, is_change INTEGER NOT NULL DEFAULT 0, requested_at TEXT NOT NULL, pin_fails INTEGER NOT NULL DEFAULT 0, locked_until ${REAL} NOT NULL DEFAULT 0)`,
     `CREATE TABLE IF NOT EXISTS attendance (id ${ID}, emp_key TEXT NOT NULL, date TEXT NOT NULL, in_time TEXT NOT NULL, out_time TEXT, method TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE (emp_key, date))`,
     `CREATE TABLE IF NOT EXISTS overtime (emp_id TEXT NOT NULL, date TEXT NOT NULL, hours ${REAL} NOT NULL, rate ${REAL} NOT NULL, approved_by TEXT NOT NULL, PRIMARY KEY (emp_id, date))`,
@@ -83,7 +83,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
 
   let schemaReady = null;
   // Columns added in later versions (ignored if they already exist).
-  const UPGRADES = [['employees', 'notes TEXT'], ['emp_settings', 'changed_by TEXT'], ['emp_settings', 'changed_at TEXT']];
+  const UPGRADES = [['employees', 'notes TEXT'], ['emp_settings', 'changed_by TEXT'], ['emp_settings', 'changed_at TEXT'], ['emp_settings', 'day_shifts TEXT']];
   const ensureSchema = () => (schemaReady = schemaReady || (async () => {
     for (const s of schema(db.dialect)) await db.exec(s);
     for (const [t, col] of UPGRADES) {
@@ -119,7 +119,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
       history: sets.filter(s => s.emp_id === e.id).map(s => ({
         from: s.eff_from, salary: Number(s.salary), start: s.start_time, end: s.end_time, hours: Number(s.hours),
         monthHours: s.month_hours == null ? null : Number(s.month_hours), off: JSON.parse(s.off_days), leaves: Number(s.leaves), grace: Number(s.grace),
-        changedBy: s.changed_by || null, changedAt: s.changed_at || null,
+        changedBy: s.changed_by || null, changedAt: s.changed_at || null, dayShifts: s.day_shifts ? JSON.parse(s.day_shifts) : {},
       })),
     }));
   }
@@ -408,14 +408,21 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     need(monthHours === null || monthHours > 0 || monthHours === -1, 'Allowed hours per month must be a positive number, Automatic, or No limit.');
     const off = (Array.isArray(b.off) ? b.off : []).map(Number).filter(n => n >= 0 && n <= 6);
     const from = old ? b.from : b.joined; need(L.isDate(from), 'Choose the date these settings take effect.');
-    const entry = { from, salary: num('salary'), start: b.start, end: b.end, hours: num('hours'), monthHours, off, leaves: Math.round(num('leaves')), grace: Math.round(num('grace')) };
+    // Day-specific hours: { "5": { start, end, hours } } keyed by weekday (0 = Sunday).
+    const dayShifts = {};
+    for (const [k, v] of Object.entries(b.dayShifts && typeof b.dayShifts === 'object' ? b.dayShifts : {})) {
+      const day = Number(k);
+      need(day >= 0 && day <= 6 && v && L.isTime(v.start) && L.isTime(v.end) && Number(v.hours) > 0 && Number(v.hours) <= 24, 'Please check the start, end and hours for each day with different hours.');
+      dayShifts[day] = { start: v.start, end: v.end, hours: Number(v.hours), flexible: v.flexible !== false };
+    }
+    const entry = { from, salary: num('salary'), start: b.start, end: b.end, hours: num('hours'), monthHours, off, leaves: Math.round(num('leaves')), grace: Math.round(num('grace')), dayShifts };
     const by = adminLabel(a);
-    const summary = `${rs(entry.salary)}, ${L.shiftText(entry)}, ${entry.hours} hrs/day, ${entry.monthHours === -1 ? 'automatic monthly hours' : entry.monthHours ? entry.monthHours + ' hrs/month allowed' : 'no monthly hours limit'}, ${entry.leaves} paid leaves/month, ${entry.grace} min grace`;
+    const summary = `${rs(entry.salary)}, ${L.shiftText(entry)}, ${entry.hours} hrs/day, ${entry.monthHours === -1 ? 'automatic monthly hours' : entry.monthHours ? entry.monthHours + ' hrs/month allowed' : 'no monthly hours limit'}, ${entry.leaves} paid leaves/month, ${entry.grace} min grace${Object.keys(entry.dayShifts).length ? '; different hours: ' + Object.entries(entry.dayShifts).map(([d, v]) => `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d]} ${L.shiftText(v)} (${v.hours} hrs)`).join(', ') : ''}`;
     await db.tx(async t => {
       const q = (sql, ...p) => t.all(sql, p);
-      const saveSettings = id => q(`INSERT INTO emp_settings (emp_id, eff_from, salary, start_time, end_time, hours, month_hours, off_days, leaves, grace, changed_by, changed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT (emp_id, eff_from) DO UPDATE SET salary = excluded.salary, start_time = excluded.start_time, end_time = excluded.end_time, hours = excluded.hours, month_hours = excluded.month_hours, off_days = excluded.off_days, leaves = excluded.leaves, grace = excluded.grace, changed_by = excluded.changed_by, changed_at = excluded.changed_at`,
-        id, entry.from, entry.salary, entry.start, entry.end, entry.hours, entry.monthHours, JSON.stringify(entry.off), entry.leaves, entry.grace, by, L.stamp());
+      const saveSettings = id => q(`INSERT INTO emp_settings (emp_id, eff_from, salary, start_time, end_time, hours, month_hours, off_days, leaves, grace, changed_by, changed_at, day_shifts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT (emp_id, eff_from) DO UPDATE SET salary = excluded.salary, start_time = excluded.start_time, end_time = excluded.end_time, hours = excluded.hours, month_hours = excluded.month_hours, off_days = excluded.off_days, leaves = excluded.leaves, grace = excluded.grace, changed_by = excluded.changed_by, changed_at = excluded.changed_at, day_shifts = excluded.day_shifts`,
+        id, entry.from, entry.salary, entry.start, entry.end, entry.hours, entry.monthHours, JSON.stringify(entry.off), entry.leaves, entry.grace, by, L.stamp(), JSON.stringify(entry.dayShifts));
       if (old) {
         await q('UPDATE employees SET name = ?, role = ?, joined = ?, left_date = ?, notes = ? WHERE id = ?', name, role, b.joined, b.left || null, notes, old.id);
         if (pin) { await q('UPDATE employees SET pin_hash = ? WHERE id = ?', hashSecret(pin), old.id); await q('UPDATE devices SET pin_fails = 0, locked_until = 0 WHERE emp_id = ?', old.id); }
@@ -531,7 +538,7 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
   });
   route('POST', '/api/settings/tracking', async ({ req, body: b }) => {
     const a = await requireAdmin(req);
-    need(L.isDate(b.date) && b.date <= L.today(), 'Choose a date that is not in the future.');
+    need(L.isDate(b.date) && b.date <= L.addDays(L.today(), 366), 'Choose a date within the next year.');
     await setSetting('tracking_start', b.date);
     await audit(adminLabel(a), `Set the attendance tracking start date to ${L.longDate(b.date)}`);
     return { ok: true };
@@ -730,8 +737,11 @@ export function createApi({ db, timeZone = 'Asia/Karachi', cronUrl = null, allow
     await addEvent('checkout', emp.id, `${emp.name} checked out at ${L.fmt(t)}.`);
     const so = L.settingsOn(emp, rec.date), rl = await rules();
     const early = (L.toMin(so.end) + (L.overnight(so) ? 1440 : 0)) - L.rel(t, so);
-    if (early > rl.earlyGrace) {
-      const worked = L.rel(t, so) - L.rel(rec.in, so);
+    const workedMin = L.rel(t, so) - L.rel(rec.in, so);
+    if (so.flexible) {
+      if (workedMin < so.hours * 60 * rl.halfPct / 100) await addEvent('early', emp.id, `${emp.name} checked out after only ${Math.floor(workedMin / 60)} hr ${workedMin % 60} min on a flexible-hours day. This counts as an absence.`);
+    } else if (early > rl.earlyGrace) {
+      const worked = workedMin;
       const earlyText = early >= 60 ? `${Math.floor(early / 60)} hr ${early % 60} min` : `${early} min`;
       await addEvent('early', emp.id, `${emp.name} left ${earlyText} early (shift ends ${L.fmt(so.end)}). This counts as ${worked >= so.hours * 60 * rl.halfPct / 100 ? 'a half day' : 'an absence'}.`);
     }
